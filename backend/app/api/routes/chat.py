@@ -4,9 +4,13 @@ from datetime import datetime
 from typing import Any
 from pydantic import BaseModel
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...services.AI import rag_service
+from ...services.ticket_service import TicketService
+from ...schemas.ticket import TicketCreate, TicketPriority, TicketSource
+from ...db.session import get_session
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -27,6 +31,7 @@ class ChatRequest(BaseModel):
     message: str
     conversation_history: list[ChatMessage] | None = None
     language: str = "ru"
+    active_escalation_id: str | None = None  # ID активной эскалации (если общаемся с оператором)
 
 
 class ToolCallResult(BaseModel):
@@ -59,17 +64,85 @@ class AddArticleRequest(BaseModel):
     priority: str = "medium"
 
 
+class ClientMessageRequest(BaseModel):
+    """Сообщение клиента в эскалацию."""
+    escalation_id: str
+    message: str
+
+
+@router.post("/escalations/{escalation_id}/messages")
+async def add_client_message(
+    escalation_id: str,
+    request: ClientMessageRequest,
+) -> dict[str, Any]:
+    """
+    Добавить сообщение клиента в эскалацию.
+    Используется когда клиент уже общается с оператором.
+    """
+    for i, escalation in enumerate(escalations_store):
+        if escalation["escalation_id"] == escalation_id or escalation["id"] == escalation_id:
+            # Add client message to conversation history
+            if "client_messages" not in escalations_store[i]:
+                escalations_store[i]["client_messages"] = []
+            escalations_store[i]["client_messages"].append({
+                "content": request.message,
+                "timestamp": datetime.now().isoformat(),
+            })
+            # Also update conversation_history
+            escalations_store[i]["conversation_history"].append({
+                "content": request.message,
+                "is_user": True,
+            })
+            return {"success": True, "escalation": escalations_store[i]}
+    
+    return {"success": False, "error": "Эскалация не найдена"}
+
+
 @router.post("", response_model=ChatResponse)
-async def chat(request: ChatRequest) -> ChatResponse:
+async def chat(
+    request: ChatRequest,
+    session: AsyncSession = Depends(get_session),
+) -> ChatResponse:
     """
     AI чат с иерархическим RAG.
     
     Выполняет:
-    1. Поиск по иерархической базе знаний
-    2. Формирование контекста
-    3. Генерация ответа через OpenAI (или fallback)
-    4. Сохранение эскалаций для операторов
+    1. Проверка активных эскалаций (если есть - сообщение идет оператору)
+    2. Поиск по иерархической базе знаний
+    3. Формирование контекста
+    4. Генерация ответа через OpenAI (или fallback)
+    5. Сохранение эскалаций для операторов
+    6. Создание тикетов в базе данных
     """
+    # Check if there's an active escalation for this conversation
+    # We check by looking at conversation history for escalation IDs
+    active_escalation_id = request.active_escalation_id if hasattr(request, 'active_escalation_id') else None
+    
+    if active_escalation_id:
+        # Find the escalation
+        for i, escalation in enumerate(escalations_store):
+            if escalation["escalation_id"] == active_escalation_id:
+                # This message goes to the operator, not AI
+                if "client_messages" not in escalations_store[i]:
+                    escalations_store[i]["client_messages"] = []
+                escalations_store[i]["client_messages"].append({
+                    "content": request.message,
+                    "timestamp": datetime.now().isoformat(),
+                })
+                escalations_store[i]["conversation_history"].append({
+                    "content": request.message,
+                    "is_user": True,
+                })
+                
+                # Return a waiting message
+                return ChatResponse(
+                    response="📨 Ваше сообщение отправлено оператору. Ожидайте ответа.",
+                    sources=[],
+                    can_auto_resolve=False,
+                    suggested_priority="medium",
+                    tool_call=None,
+                )
+    
     history = None
     if request.conversation_history:
         history = [{"content": m.content, "is_user": m.is_user} for m in request.conversation_history]
@@ -80,47 +153,204 @@ async def chat(request: ChatRequest) -> ChatResponse:
         language=request.language,
     )
     
-    # Если был tool_call с эскалацией - сохраняем для оператора
+    # Если был tool_call с эскалацией - создаём тикет в БД и сохраняем для оператора
     if result.get("tool_call") and result["tool_call"].get("name") == "escalate_to_operator":
         tool_result = result["tool_call"]["result"]
+        
+        # Определяем department_id для эскалации
+        dept_mapping = {
+            "it_support": "11111111-1111-1111-1111-111111111111",
+            "hr": "22222222-2222-2222-2222-222222222222",
+            "finance": "33333333-3333-3333-3333-333333333333",
+            "facilities": "44444444-4444-4444-4444-444444444444",
+        }
+        
+        dept = tool_result.get("department", "it_support")
+        priority_str = tool_result.get("priority", "medium")
+        
+        # Создаём тикет в базе данных для эскалации
+        ticket_number = tool_result.get("escalation_id")
+        ticket_id = None
+        try:
+            ticket_service = TicketService(session)
+            ticket_data = TicketCreate(
+                subject=tool_result.get("summary", "Эскалированное обращение"),
+                description=request.message,
+                priority=TicketPriority(priority_str),
+                source=TicketSource.CHAT,
+                department_id=dept_mapping.get(dept),
+            )
+            # create_ticket returns tuple (Ticket, AIClassificationResult)
+            db_ticket, classification = await ticket_service.create_ticket(ticket_data)
+            ticket_number = db_ticket.ticket_number
+            ticket_id = str(db_ticket.id)
+            
+            # Обновляем результат с реальным номером тикета
+            tool_result["escalation_id"] = ticket_number
+            tool_result["ticket_id"] = ticket_id
+            result["tool_call"]["result"] = tool_result
+        except Exception as e:
+            print(f"Error creating escalation ticket in DB: {e}")
+            import traceback
+            traceback.print_exc()
+        
         escalation = {
             "id": str(len(escalations_store) + 1),
-            "escalation_id": tool_result.get("escalation_id"),
+            "escalation_id": ticket_number,
             "client_message": request.message,
             "summary": tool_result.get("summary", ""),
             "reason": tool_result.get("reason", ""),
-            "department": tool_result.get("department", "it_support"),
+            "department": dept,
             "department_name": tool_result.get("department_name", "IT Поддержка"),
-            "priority": tool_result.get("priority", "medium"),
+            "priority": priority_str,
             "status": "pending",
             "created_at": datetime.now().isoformat(),
             "conversation_history": [
                 {"content": m.content, "is_user": m.is_user}
                 for m in (request.conversation_history or [])
             ] + [{"content": request.message, "is_user": True}],
+            "client_messages": [],
+            "operator_messages": [],
+            "ticket_id": ticket_id,  # Связь с БД тикетом
         }
         escalations_store.append(escalation)
     
-    # Если был tool_call с созданием тикета - тоже сохраняем
+    # Если был tool_call с созданием тикета - сохраняем в базу данных
     if result.get("tool_call") and result["tool_call"].get("name") == "create_ticket":
         tool_result = result["tool_call"]["result"]
+        
+        # Определяем department_id
+        dept_mapping = {
+            "it_support": "11111111-1111-1111-1111-111111111111",
+            "hr": "22222222-2222-2222-2222-222222222222",
+            "finance": "33333333-3333-3333-3333-333333333333",
+            "facilities": "44444444-4444-4444-4444-444444444444",
+        }
+        dept_name_mapping = {
+            "it_support": "IT Поддержка",
+            "hr": "HR / Кадры",
+            "finance": "Финансы",
+            "facilities": "АХО",
+        }
+        
+        dept = tool_result.get("department", "it_support")
+        priority_str = tool_result.get("priority", "medium")
+        
+        # Создаём тикет в базе данных
+        ticket_number = None
+        ticket_id = None
+        try:
+            ticket_service = TicketService(session)
+            ticket_data = TicketCreate(
+                subject=tool_result.get("subject", "Новое обращение"),
+                description=tool_result.get("description", request.message),
+                client_email=tool_result.get("client_email"),
+                priority=TicketPriority(priority_str),
+                source=TicketSource.CHAT,
+                department_id=dept_mapping.get(dept),
+            )
+            # create_ticket returns tuple (Ticket, AIClassificationResult)
+            db_ticket, classification = await ticket_service.create_ticket(ticket_data)
+            
+            # Обновляем номер тикета в результате
+            ticket_number = db_ticket.ticket_number
+            ticket_id = str(db_ticket.id)
+            tool_result["ticket_number"] = ticket_number
+            tool_result["ticket_id"] = ticket_id
+            tool_result["ai_auto_resolved"] = db_ticket.ai_auto_resolved
+            result["tool_call"]["result"] = tool_result
+        except Exception as e:
+            print(f"Error creating ticket in DB: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Также сохраняем для оператора (in-memory)
         escalation = {
             "id": str(len(escalations_store) + 1),
-            "escalation_id": tool_result.get("ticket_number"),
+            "escalation_id": ticket_number or tool_result.get("ticket_number"),
             "client_message": request.message,
             "summary": tool_result.get("subject", ""),
             "reason": "Клиент создал тикет",
-            "department": tool_result.get("department", "it_support"),
-            "department_name": "IT Поддержка",
-            "priority": tool_result.get("priority", "medium"),
+            "department": dept,
+            "department_name": dept_name_mapping.get(dept, "IT Поддержка"),
+            "priority": priority_str,
             "status": "pending",
             "created_at": datetime.now().isoformat(),
             "conversation_history": [
                 {"content": m.content, "is_user": m.is_user}
                 for m in (request.conversation_history or [])
             ] + [{"content": request.message, "is_user": True}],
+            "client_messages": [],
+            "operator_messages": [],
+            "ticket_id": ticket_id,  # Связь с БД тикетом
         }
         escalations_store.append(escalation)
+    
+    # Если был tool_call с отметкой "решено AI" - создаём/обновляем тикет как авто-решённый
+    if result.get("tool_call") and result["tool_call"].get("name") == "mark_resolved_by_ai":
+        tool_result = result["tool_call"]["result"]
+        
+        try:
+            ticket_service = TicketService(session)
+            from ...models.ticket import TicketStatus
+            
+            # Определяем тему из истории разговора
+            subject = "Запрос решён AI"
+            if request.conversation_history and len(request.conversation_history) > 0:
+                first_message = request.conversation_history[0].content
+                subject = first_message[:100] + ("..." if len(first_message) > 100 else "")
+            
+            # Создаём новый тикет как авто-решённый
+            ticket_data = TicketCreate(
+                subject=subject,
+                description=f"Решение: {tool_result.get('resolution_summary', '')}\n\nИсходный запрос: {request.message}",
+                priority=TicketPriority.LOW,
+                source=TicketSource.CHAT,
+            )
+            
+            db_ticket, classification = await ticket_service.create_ticket(ticket_data)
+            
+            # Принудительно помечаем как авто-решённый AI
+            db_ticket.ai_auto_resolved = True
+            db_ticket.status = TicketStatus.RESOLVED
+            db_ticket.resolved_at = datetime.now()
+            db_ticket.first_response_at = datetime.now()
+            await session.commit()
+            await session.refresh(db_ticket)
+            
+            # Обновляем результат
+            tool_result["ticket_number"] = db_ticket.ticket_number
+            tool_result["ticket_id"] = str(db_ticket.id)
+            result["tool_call"]["result"] = tool_result
+            
+            # Добавляем в escalations_store для отслеживания
+            escalation = {
+                "id": str(len(escalations_store) + 1),
+                "escalation_id": db_ticket.ticket_number,
+                "client_message": request.message,
+                "summary": subject,
+                "reason": f"AI решено: {tool_result.get('resolution_summary', '')}",
+                "department": "it_support",
+                "department_name": "AI Поддержка",
+                "priority": "low",
+                "status": "resolved",  # Уже решено!
+                "created_at": datetime.now().isoformat(),
+                "resolved_at": datetime.now().isoformat(),
+                "conversation_history": [
+                    {"content": m.content, "is_user": m.is_user}
+                    for m in (request.conversation_history or [])
+                ] + [{"content": request.message, "is_user": True}],
+                "client_messages": [],
+                "operator_messages": [],
+                "ticket_id": str(db_ticket.id),
+                "ai_auto_resolved": True,
+            }
+            escalations_store.append(escalation)
+            
+        except Exception as e:
+            print(f"Error creating AI-resolved ticket in DB: {e}")
+            import traceback
+            traceback.print_exc()
     
     return ChatResponse(**result)
 
@@ -292,15 +522,26 @@ async def update_escalation(
     
     Позволяет:
     - Изменить статус (pending -> in_progress -> resolved)
-    - Добавить ответ оператора
+    - Добавить ответ оператора (добавляется в список сообщений)
     """
     for i, escalation in enumerate(escalations_store):
         if escalation["escalation_id"] == escalation_id or escalation["id"] == escalation_id:
             if request.status:
                 escalations_store[i]["status"] = request.status
+                # Set resolved_at only when status becomes resolved
+                if request.status == "resolved":
+                    escalations_store[i]["resolved_at"] = datetime.now().isoformat()
             if request.operator_response:
+                # Store ALL operator messages in a list
+                if "operator_messages" not in escalations_store[i]:
+                    escalations_store[i]["operator_messages"] = []
+                escalations_store[i]["operator_messages"].append({
+                    "content": request.operator_response,
+                    "timestamp": datetime.now().isoformat(),
+                })
+                # Also update the latest response for compatibility
                 escalations_store[i]["operator_response"] = request.operator_response
-                escalations_store[i]["resolved_at"] = datetime.now().isoformat()
+                escalations_store[i]["responded_at"] = datetime.now().isoformat()
             return {"success": True, "escalation": escalations_store[i]}
     
     return {"success": False, "error": "Эскалация не найдена"}
@@ -420,4 +661,29 @@ async def get_csat_stats() -> dict[str, Any]:
         "distribution": distribution,
         "satisfaction_rate": satisfaction_rate,
     }
+
+
+@router.get("/csat/reviews")
+async def get_csat_reviews() -> list[dict[str, Any]]:
+    """
+    Получить все CSAT отзывы с комментариями.
+    
+    Возвращает список отзывов, отсортированных по дате.
+    """
+    reviews = []
+    for e in escalations_store:
+        if e.get("csat_rating"):
+            reviews.append({
+                "escalation_id": e.get("escalation_id"),
+                "rating": e.get("csat_rating"),
+                "feedback": e.get("csat_feedback"),
+                "submitted_at": e.get("csat_submitted_at"),
+                "summary": e.get("summary"),
+                "department_name": e.get("department_name"),
+                "resolved_at": e.get("resolved_at"),
+            })
+    
+    # Sort by submission date (newest first)
+    reviews.sort(key=lambda x: x.get("submitted_at", ""), reverse=True)
+    return reviews
 

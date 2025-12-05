@@ -118,17 +118,17 @@ class Ticket(Base):
     
     # Классификация
     status: Mapped[TicketStatus] = mapped_column(
-        Enum(TicketStatus),
+        Enum(TicketStatus, values_callable=lambda x: [e.value for e in x], name='ticketstatus'),
         default=TicketStatus.NEW,
         nullable=False,
     )
     priority: Mapped[TicketPriority] = mapped_column(
-        Enum(TicketPriority),
+        Enum(TicketPriority, values_callable=lambda x: [e.value for e in x], name='ticketpriority'),
         default=TicketPriority.MEDIUM,
         nullable=False,
     )
     source: Mapped[TicketSource] = mapped_column(
-        Enum(TicketSource),
+        Enum(TicketSource, values_callable=lambda x: [e.value for e in x], name='ticketsource'),
         default=TicketSource.PORTAL,
         nullable=False,
     )

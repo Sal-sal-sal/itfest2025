@@ -11,8 +11,19 @@ import {
   Bot,
   ArrowRight,
   RefreshCw,
+  Star,
+  Smile,
+  Meh,
+  Frown,
 } from 'lucide-react'
-import { ticketsApi, type DashboardStats } from '../api/client'
+import { ticketsApi, chatApi, type DashboardStats } from '../api/client'
+
+interface CSATStats {
+  average: number
+  total_responses: number
+  distribution: Record<number, number>
+  satisfaction_rate: number
+}
 
 const priorityLabels: Record<string, string> = {
   low: 'Низкий',
@@ -62,16 +73,34 @@ function formatDate(dateStr: string): string {
   return date.toLocaleDateString('ru-RU')
 }
 
+interface CSATReview {
+  escalation_id: string
+  rating: number
+  feedback: string | null
+  submitted_at: string
+  summary: string
+  department_name: string
+  resolved_at: string | null
+}
+
 export const DashboardPage = () => {
   const [stats, setStats] = useState<DashboardStats | null>(null)
+  const [csatStats, setCSATStats] = useState<CSATStats | null>(null)
+  const [csatReviews, setCSATReviews] = useState<CSATReview[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const fetchStats = async () => {
     try {
       setLoading(true)
-      const response = await ticketsApi.getDashboardStats()
-      setStats(response.data)
+      const [statsRes, csatRes, reviewsRes] = await Promise.all([
+        ticketsApi.getDashboardStats(),
+        chatApi.getCSATStats(),
+        chatApi.getCSATReviews(),
+      ])
+      setStats(statsRes.data)
+      setCSATStats(csatRes.data)
+      setCSATReviews(reviewsRes.data)
       setError(null)
     } catch (err) {
       setError('Не удалось загрузить статистику')
@@ -263,6 +292,168 @@ export const DashboardPage = () => {
             ))}
           </div>
         </div>
+      </div>
+
+      {/* CSAT Widget */}
+      <div className="rounded-2xl border border-border/30 bg-gradient-to-br from-amber-500/5 to-yellow-500/5 p-6 shadow-sm">
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-amber-500 to-yellow-500 text-white">
+              <Star className="h-6 w-6" />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-foreground">CSAT - Удовлетворённость клиентов</h3>
+              <p className="text-sm text-muted">Customer Satisfaction Score</p>
+            </div>
+          </div>
+          {csatStats && csatStats.satisfaction_rate > 0 && (
+            <div className="flex items-center gap-2">
+              {csatStats.satisfaction_rate >= 0.8 ? (
+                <Smile className="h-8 w-8 text-emerald-500" />
+              ) : csatStats.satisfaction_rate >= 0.5 ? (
+                <Meh className="h-8 w-8 text-amber-500" />
+              ) : (
+                <Frown className="h-8 w-8 text-red-500" />
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="grid gap-6 md:grid-cols-3">
+          {/* Average Score */}
+          <div className="rounded-xl bg-surface/70 p-4 text-center">
+            <div className="flex items-center justify-center gap-1 mb-2">
+              {[1, 2, 3, 4, 5].map((star) => (
+                <Star
+                  key={star}
+                  className={`h-5 w-5 ${
+                    star <= Math.round(csatStats?.average ?? 0)
+                      ? 'fill-yellow-400 text-yellow-400'
+                      : 'text-gray-300 dark:text-gray-600'
+                  }`}
+                />
+              ))}
+            </div>
+            <p className="text-3xl font-bold text-foreground">
+              {(csatStats?.average ?? 0).toFixed(1)}
+            </p>
+            <p className="text-sm text-muted">Средняя оценка</p>
+          </div>
+
+          {/* Satisfaction Rate */}
+          <div className="rounded-xl bg-surface/70 p-4 text-center">
+            <p className="text-3xl font-bold text-emerald-500">
+              {((csatStats?.satisfaction_rate ?? 0) * 100).toFixed(0)}%
+            </p>
+            <p className="text-sm text-muted">Довольных клиентов</p>
+            <p className="text-xs text-muted mt-1">(оценка 4-5 ⭐)</p>
+          </div>
+
+          {/* Total Responses */}
+          <div className="rounded-xl bg-surface/70 p-4 text-center">
+            <p className="text-3xl font-bold text-foreground">
+              {csatStats?.total_responses ?? 0}
+            </p>
+            <p className="text-sm text-muted">Всего оценок</p>
+          </div>
+        </div>
+
+        {/* Distribution */}
+        {csatStats && csatStats.total_responses > 0 && (
+          <div className="mt-6">
+            <p className="text-sm text-muted mb-3">Распределение оценок:</p>
+            <div className="flex items-end justify-between gap-2 h-24">
+              {[1, 2, 3, 4, 5].map((rating) => {
+                const count = csatStats.distribution[rating] ?? 0
+                const percentage = csatStats.total_responses > 0 
+                  ? (count / csatStats.total_responses) * 100 
+                  : 0
+                return (
+                  <div key={rating} className="flex-1 flex flex-col items-center gap-1">
+                    <div 
+                      className={`w-full rounded-t-lg transition-all ${
+                        rating >= 4 ? 'bg-emerald-500' : rating >= 3 ? 'bg-amber-500' : 'bg-red-500'
+                      }`}
+                      style={{ height: `${Math.max(percentage, 5)}%` }}
+                    />
+                    <span className="text-xs font-medium text-foreground">{rating}⭐</span>
+                    <span className="text-xs text-muted">{count}</span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* CSAT Reviews / Comments */}
+        {csatReviews.length > 0 && (
+          <div className="mt-6 border-t border-border/20 pt-6">
+            <p className="text-sm font-medium text-foreground mb-4">💬 Последние отзывы клиентов:</p>
+            <div className="space-y-3 max-h-64 overflow-y-auto">
+              {csatReviews.slice(0, 10).map((review) => (
+                <div 
+                  key={review.escalation_id} 
+                  className="rounded-xl bg-surface/50 p-4 border border-border/20"
+                >
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-2">
+                        {/* Stars */}
+                        <div className="flex">
+                          {[1, 2, 3, 4, 5].map((star) => (
+                            <Star
+                              key={star}
+                              className={`h-4 w-4 ${
+                                star <= review.rating
+                                  ? 'fill-yellow-400 text-yellow-400'
+                                  : 'text-gray-300 dark:text-gray-600'
+                              }`}
+                            />
+                          ))}
+                        </div>
+                        <span className="text-xs text-muted">
+                          {review.submitted_at ? formatDate(review.submitted_at) : ''}
+                        </span>
+                      </div>
+                      
+                      {/* Feedback comment */}
+                      {review.feedback ? (
+                        <p className="text-sm text-foreground italic">"{review.feedback}"</p>
+                      ) : (
+                        <p className="text-sm text-muted italic">Без комментария</p>
+                      )}
+                      
+                      {/* Summary of the issue */}
+                      <p className="text-xs text-muted mt-2">
+                        📋 {review.summary}
+                      </p>
+                      <p className="text-xs text-muted">
+                        🏢 {review.department_name}
+                      </p>
+                    </div>
+                    
+                    {/* Sentiment icon */}
+                    <div className="flex-shrink-0">
+                      {review.rating >= 4 ? (
+                        <Smile className="h-6 w-6 text-emerald-500" />
+                      ) : review.rating >= 3 ? (
+                        <Meh className="h-6 w-6 text-amber-500" />
+                      ) : (
+                        <Frown className="h-6 w-6 text-red-500" />
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            
+            {csatReviews.length > 10 && (
+              <p className="text-xs text-muted text-center mt-3">
+                Показано 10 из {csatReviews.length} отзывов
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Department Stats */}

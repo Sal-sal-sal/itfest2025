@@ -66,6 +66,10 @@ class TicketService:
             language=data.language,
         )
         
+        # Используем переданные значения или значения из AI-классификации
+        final_priority = data.priority if data.priority else classification.priority
+        final_department_id = data.department_id if data.department_id else classification.department_id
+        
         # Создаем тикет
         ticket = Ticket(
             ticket_number=generate_ticket_number(),
@@ -77,8 +81,8 @@ class TicketService:
             language=classification.detected_language,
             source=data.source,
             status=TicketStatus.NEW,
-            priority=classification.priority,
-            department_id=classification.department_id,
+            priority=final_priority,
+            department_id=final_department_id,
             category_id=data.category_id or classification.category_id,
             ai_classified=True,
             ai_confidence=classification.confidence,

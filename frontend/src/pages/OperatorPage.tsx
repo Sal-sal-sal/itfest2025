@@ -4,6 +4,7 @@ import {
   Plus,
   Send,
   BookOpen,
+  CheckCircle,
   CheckCircle2,
   Clock,
   Brain,
@@ -15,7 +16,43 @@ import {
   Languages,
   FileText,
   Wand2,
+  Timer,
+  Volume2,
+  VolumeX,
 } from 'lucide-react'
+
+// SLA времена по приоритету (в минутах)
+const SLA_TIMES: Record<string, number> = {
+  low: 480,      // 8 часов
+  medium: 240,   // 4 часа
+  high: 60,      // 1 час
+  critical: 15,  // 15 минут
+}
+
+// Функция расчёта оставшегося времени SLA
+const getSLAStatus = (createdAt: string, priority: string) => {
+  const created = new Date(createdAt).getTime()
+  const now = Date.now()
+  const elapsed = (now - created) / 60000 // в минутах
+  const slaTime = SLA_TIMES[priority] || 240
+  const remaining = slaTime - elapsed
+  
+  const formatTime = (mins: number) => {
+    if (mins < 0) return 'Просрочено'
+    if (mins < 60) return `${Math.round(mins)} мин`
+    const hours = Math.floor(mins / 60)
+    const minutes = Math.round(mins % 60)
+    return `${hours}ч ${minutes}м`
+  }
+  
+  return {
+    remaining,
+    formatted: formatTime(remaining),
+    percentage: Math.max(0, Math.min(100, (remaining / slaTime) * 100)),
+    isOverdue: remaining < 0,
+    isWarning: remaining > 0 && remaining < slaTime * 0.25, // < 25% времени
+  }
+}
 import { chatApi, type Escalation } from '../api/client'
 
 interface KBArticle {
@@ -84,6 +121,45 @@ const statusColors = {
   resolved: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300',
 }
 
+// Шаблоны быстрых ответов
+const responseTemplates = [
+  {
+    id: 'greeting',
+    name: '👋 Приветствие',
+    text: 'Здравствуйте! Спасибо за обращение в службу поддержки. Я изучил вашу проблему и готов помочь.',
+  },
+  {
+    id: 'clarify',
+    name: '❓ Уточнение',
+    text: 'Для более точного решения вашей проблемы, пожалуйста, уточните:\n\n1. Когда именно возникла проблема?\n2. Какие действия вы предпринимали?\n3. Есть ли сообщения об ошибках?',
+  },
+  {
+    id: 'working',
+    name: '🔧 В работе',
+    text: 'Ваше обращение принято в работу. Я занимаюсь решением вашей проблемы и свяжусь с вами, как только будет результат.',
+  },
+  {
+    id: 'resolved',
+    name: '✅ Решено',
+    text: 'Рад сообщить, что ваша проблема решена!\n\nЕсли у вас возникнут дополнительные вопросы, не стесняйтесь обращаться. Хорошего дня!',
+  },
+  {
+    id: 'escalate',
+    name: '⬆️ Эскалация',
+    text: 'Для решения вашего вопроса требуется привлечение профильного специалиста. Я передаю ваше обращение в соответствующий отдел. Ожидайте ответа в ближайшее время.',
+  },
+  {
+    id: 'password',
+    name: '🔑 Сброс пароля',
+    text: 'Для сброса пароля выполните следующие шаги:\n\n1. Перейдите на страницу входа\n2. Нажмите "Забыли пароль?"\n3. Введите ваш email\n4. Проверьте почту и перейдите по ссылке\n5. Установите новый пароль\n\nЕсли письмо не пришло, проверьте папку "Спам".',
+  },
+  {
+    id: 'thanks',
+    name: '🙏 Благодарность',
+    text: 'Благодарим вас за обращение! Если вам понравился наш сервис, будем признательны за высокую оценку. Всего доброго!',
+  },
+]
+
 export const OperatorPage = () => {
   const [activeTab, setActiveTab] = useState<'tickets' | 'knowledge'>('tickets')
   const [tickets, setTickets] = useState<Escalation[]>([])
@@ -112,6 +188,49 @@ export const OperatorPage = () => {
   const [isGeneratingSuggestion, setIsGeneratingSuggestion] = useState(false)
   const [isSummarizing, setIsSummarizing] = useState(false)
   const [isTranslating, setIsTranslating] = useState(false)
+  
+  // Sound notification state
+  const [soundEnabled, setSoundEnabled] = useState(true)
+  const [lastTicketCount, setLastTicketCount] = useState(0)
+
+  // Play notification sound
+  const playNotificationSound = () => {
+    if (!soundEnabled) return
+    try {
+      const audioContext = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)()
+      const oscillator = audioContext.createOscillator()
+      const gainNode = audioContext.createGain()
+      
+      oscillator.connect(gainNode)
+      gainNode.connect(audioContext.destination)
+      
+      oscillator.frequency.value = 800
+      oscillator.type = 'sine'
+      gainNode.gain.value = 0.3
+      
+      oscillator.start()
+      
+      setTimeout(() => {
+        oscillator.frequency.value = 1000
+      }, 100)
+      
+      setTimeout(() => {
+        oscillator.stop()
+        audioContext.close()
+      }, 200)
+    } catch (e) {
+      console.log('Audio not supported')
+    }
+  }
+
+  // Check for new tickets and play sound
+  useEffect(() => {
+    const pendingCount = tickets.filter(t => t.status === 'pending').length
+    if (pendingCount > lastTicketCount && lastTicketCount > 0) {
+      playNotificationSound()
+    }
+    setLastTicketCount(pendingCount)
+  }, [tickets, lastTicketCount, soundEnabled])
 
   // Load escalations from API
   const loadEscalations = useCallback(async () => {
@@ -130,10 +249,28 @@ export const OperatorPage = () => {
   useEffect(() => {
     loadEscalations()
     
-    // Poll every 10 seconds for new escalations
-    const interval = setInterval(loadEscalations, 10000)
+    // Poll every 5 seconds for new escalations (faster for chat)
+    const interval = setInterval(loadEscalations, 5000)
     return () => clearInterval(interval)
   }, [loadEscalations])
+
+  // Auto-refresh selected ticket to see new client messages
+  useEffect(() => {
+    if (!selectedTicket) return
+
+    const refreshSelectedTicket = async () => {
+      try {
+        const res = await chatApi.getEscalation(selectedTicket.escalation_id)
+        setSelectedTicket(res.data)
+      } catch (error) {
+        console.error('Error refreshing ticket:', error)
+      }
+    }
+
+    // Refresh every 3 seconds when ticket is selected
+    const interval = setInterval(refreshSelectedTicket, 3000)
+    return () => clearInterval(interval)
+  }, [selectedTicket?.escalation_id])
 
   // Filter tickets
   const filteredTickets = tickets.filter((ticket) => {
@@ -156,9 +293,8 @@ export const OperatorPage = () => {
     setIsSubmitting(true)
 
     try {
-      // Call API to update escalation
+      // Send response without changing status to resolved
       await chatApi.updateEscalation(selectedTicket.escalation_id, {
-        status: 'resolved',
         operator_response: response,
       })
 
@@ -166,11 +302,28 @@ export const OperatorPage = () => {
       await loadEscalations()
 
       setResponse('')
-      setSelectedTicket(null)
+      // Don't close the ticket view - operator might want to continue
     } catch (error) {
       console.error('Error sending response:', error)
     } finally {
       setIsSubmitting(false)
+    }
+  }
+
+  // Mark ticket as resolved
+  const handleMarkResolved = async () => {
+    if (!selectedTicket) return
+
+    try {
+      await chatApi.updateEscalation(selectedTicket.escalation_id, {
+        status: 'resolved',
+      })
+
+      await loadEscalations()
+      setSelectedTicket(null)
+      setResponse('')
+    } catch (error) {
+      console.error('Error marking as resolved:', error)
     }
   }
 
@@ -301,11 +454,44 @@ export const OperatorPage = () => {
               </p>
             </div>
             <div className="flex items-center gap-4">
+              {/* Sound toggle */}
+              <button
+                onClick={() => setSoundEnabled(!soundEnabled)}
+                className={`flex items-center gap-2 rounded-lg px-3 py-2 transition ${
+                  soundEnabled
+                    ? 'bg-brand-500/10 text-brand-600 dark:text-brand-400'
+                    : 'bg-surface text-muted'
+                }`}
+                title={soundEnabled ? 'Звук включён' : 'Звук выключен'}
+              >
+                {soundEnabled ? (
+                  <Volume2 className="h-4 w-4" />
+                ) : (
+                  <VolumeX className="h-4 w-4" />
+                )}
+                <span className="text-sm font-medium hidden sm:inline">
+                  {soundEnabled ? 'Звук вкл' : 'Звук выкл'}
+                </span>
+              </button>
+              
               <div className="flex items-center gap-2 rounded-lg bg-emerald-500/10 px-3 py-2">
                 <div className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />
                 <span className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
                   Онлайн
                 </span>
+              </div>
+
+              {/* Operator Profile */}
+              <div className="flex items-center gap-3 rounded-xl bg-surface border border-border/30 px-4 py-2">
+                <img
+                  src="/images/operator-avatar.webp"
+                  alt="Оператор"
+                  className="h-10 w-10 rounded-full object-cover ring-2 ring-brand-500/30"
+                />
+                <div className="hidden sm:block">
+                  <p className="text-sm font-semibold text-foreground">Алексей Иванов</p>
+                  <p className="text-xs text-muted">Старший оператор</p>
+                </div>
               </div>
             </div>
           </div>
@@ -422,12 +608,34 @@ export const OperatorPage = () => {
                         </div>
                         <ChevronRight className="h-5 w-5 text-muted" />
                       </div>
-                      <div className="mt-3 flex items-center gap-4 text-xs text-muted">
-                        <span className="flex items-center gap-1">
-                          <Clock className="h-3 w-3" />
-                          {Math.round((Date.now() - new Date(ticket.created_at).getTime()) / 60000)} мин назад
-                        </span>
-                      </div>
+                      {/* SLA Timer */}
+                      {ticket.status !== 'resolved' && (() => {
+                        const sla = getSLAStatus(ticket.created_at, ticket.priority)
+                        return (
+                          <div className="mt-3">
+                            <div className="flex items-center justify-between text-xs mb-1">
+                              <span className="flex items-center gap-1 text-muted">
+                                <Clock className="h-3 w-3" />
+                                {Math.round((Date.now() - new Date(ticket.created_at).getTime()) / 60000)} мин назад
+                              </span>
+                              <span className={`flex items-center gap-1 font-medium ${
+                                sla.isOverdue ? 'text-red-500' : sla.isWarning ? 'text-amber-500' : 'text-emerald-500'
+                              }`}>
+                                <Timer className="h-3 w-3" />
+                                SLA: {sla.formatted}
+                              </span>
+                            </div>
+                            <div className="h-1.5 rounded-full bg-border/30 overflow-hidden">
+                              <div
+                                className={`h-full transition-all ${
+                                  sla.isOverdue ? 'bg-red-500' : sla.isWarning ? 'bg-amber-500' : 'bg-emerald-500'
+                                }`}
+                                style={{ width: `${sla.percentage}%` }}
+                              />
+                            </div>
+                          </div>
+                        )
+                      })()}
                     </div>
                   ))
                 )}
@@ -490,33 +698,96 @@ export const OperatorPage = () => {
                     </div>
                     <h3 className="mt-2 font-medium text-foreground">{selectedTicket.summary}</h3>
                     
-                    {/* Conversation history */}
-                    {selectedTicket.conversation_history && selectedTicket.conversation_history.length > 0 && (
-                      <div className="mt-4 space-y-2">
-                        <p className="text-xs font-medium text-muted">История разговора:</p>
-                        <div className="max-h-40 overflow-y-auto space-y-2 rounded-lg bg-surface p-2">
-                          {selectedTicket.conversation_history.map((msg, idx) => (
-                            <div
-                              key={idx}
-                              className={`rounded-lg p-2 text-sm ${
-                                msg.is_user
-                                  ? 'bg-brand-500/10 text-foreground'
-                                  : 'bg-purple-500/10 text-foreground'
-                              }`}
-                            >
-                              <span className="text-xs text-muted">
-                                {msg.is_user ? '👤 Клиент:' : '🤖 AI:'}
-                              </span>
-                              <p className="mt-1">{msg.content}</p>
-                            </div>
-                          ))}
-                        </div>
+                    {/* Full chat history with client */}
+                    <div className="mt-4 space-y-2">
+                      <p className="text-xs font-medium text-muted">💬 Чат с клиентом:</p>
+                      <div className="max-h-60 overflow-y-auto space-y-2 rounded-lg bg-surface p-3">
+                        {/* Combine all messages and sort by timestamp */}
+                        {(() => {
+                          // Build unified message list
+                          const allMessages: Array<{
+                            type: 'history' | 'client' | 'operator'
+                            content: string
+                            timestamp: Date
+                            is_user?: boolean
+                          }> = []
+
+                          // Add conversation history (no timestamps, keep original order)
+                          selectedTicket.conversation_history?.forEach((msg, idx) => {
+                            allMessages.push({
+                              type: 'history',
+                              content: msg.content,
+                              timestamp: new Date(new Date(selectedTicket.created_at).getTime() + idx * 1000),
+                              is_user: msg.is_user,
+                            })
+                          })
+
+                          // Add client messages with timestamps
+                          selectedTicket.client_messages?.forEach((msg) => {
+                            allMessages.push({
+                              type: 'client',
+                              content: msg.content,
+                              timestamp: new Date(msg.timestamp),
+                            })
+                          })
+
+                          // Add operator messages with timestamps
+                          selectedTicket.operator_messages?.forEach((msg) => {
+                            allMessages.push({
+                              type: 'operator',
+                              content: msg.content,
+                              timestamp: new Date(msg.timestamp),
+                            })
+                          })
+
+                          // Sort by timestamp
+                          allMessages.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
+
+                          return allMessages.map((msg, idx) => {
+                            if (msg.type === 'history') {
+                              return (
+                                <div
+                                  key={`msg-${idx}`}
+                                  className={`rounded-lg p-2 text-sm ${
+                                    msg.is_user
+                                      ? 'bg-brand-500/10 text-foreground ml-4'
+                                      : 'bg-purple-500/10 text-foreground mr-4'
+                                  }`}
+                                >
+                                  <span className="text-xs text-muted">
+                                    {msg.is_user ? '👤 Клиент' : '🤖 AI'}
+                                  </span>
+                                  <p className="mt-1">{msg.content}</p>
+                                </div>
+                              )
+                            } else if (msg.type === 'client') {
+                              return (
+                                <div
+                                  key={`msg-${idx}`}
+                                  className="rounded-lg p-2 text-sm bg-blue-500/10 text-foreground ml-4 border-l-2 border-blue-500"
+                                >
+                                  <span className="text-xs text-blue-600 dark:text-blue-400">
+                                    👤 Клиент • {msg.timestamp.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
+                                  </span>
+                                  <p className="mt-1">{msg.content}</p>
+                                </div>
+                              )
+                            } else {
+                              return (
+                                <div
+                                  key={`msg-${idx}`}
+                                  className="rounded-lg p-2 text-sm bg-emerald-500/10 text-foreground mr-4 border-l-2 border-emerald-500"
+                                >
+                                  <span className="text-xs text-emerald-600 dark:text-emerald-400">
+                                    👨‍💼 Вы • {msg.timestamp.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
+                                  </span>
+                                  <p className="mt-1">{msg.content}</p>
+                                </div>
+                              )
+                            }
+                          })
+                        })()}
                       </div>
-                    )}
-                    
-                    <div className="mt-4 rounded-lg bg-surface p-3">
-                      <p className="text-xs font-medium text-muted mb-1">Последнее сообщение клиента:</p>
-                      <p className="text-sm text-foreground">{selectedTicket.client_message}</p>
                     </div>
 
                     <div className="mt-3 rounded-lg bg-amber-500/10 p-3">
@@ -643,6 +914,24 @@ export const OperatorPage = () => {
                     </div>
                   </div>
 
+                  {/* Quick Response Templates */}
+                  <div className="mb-4">
+                    <label className="mb-2 block text-sm font-medium text-foreground">
+                      📝 Быстрые шаблоны
+                    </label>
+                    <div className="flex flex-wrap gap-2">
+                      {responseTemplates.map((template) => (
+                        <button
+                          key={template.id}
+                          onClick={() => setResponse(template.text)}
+                          className="rounded-lg border border-border/30 bg-background px-3 py-1.5 text-xs font-medium text-foreground transition hover:border-brand-400 hover:bg-brand-500/5"
+                        >
+                          {template.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
                   {/* Response Input */}
                   <div>
                     <label className="mb-2 block text-sm font-medium text-foreground">
@@ -666,8 +955,18 @@ export const OperatorPage = () => {
                         ) : (
                           <Send className="h-4 w-4" />
                         )}
-                        Отправить ответ и закрыть
+                        Отправить ответ
                       </button>
+                      <button
+                        onClick={handleMarkResolved}
+                        disabled={selectedTicket.status === 'resolved'}
+                        className="flex items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-3 font-medium text-white transition hover:bg-emerald-600 disabled:opacity-50"
+                      >
+                        <CheckCircle className="h-4 w-4" />
+                        Решено
+                      </button>
+                    </div>
+                    <div className="flex gap-2">
                       <button
                         onClick={() => {
                           setActiveTab('knowledge')
@@ -677,10 +976,10 @@ export const OperatorPage = () => {
                             answer: response || '',
                           }))
                         }}
-                        className="flex items-center gap-2 rounded-xl border border-border/30 bg-background px-4 py-3 font-medium text-foreground transition hover:bg-surface"
+                        className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-border/30 bg-background px-4 py-3 font-medium text-foreground transition hover:bg-surface"
                       >
                         <BookOpen className="h-4 w-4" />
-                        В базу знаний
+                        Добавить в базу знаний
                       </button>
                     </div>
                   </div>

@@ -88,6 +88,9 @@ class TicketCreate(TicketBase):
     client_phone: str | None = Field(max_length=50, default=None)
     source: TicketSource = TicketSource.PORTAL
     category_id: uuid.UUID | None = None
+    # Опциональные поля для переопределения AI-классификации
+    priority: TicketPriority | None = None
+    department_id: uuid.UUID | None = None
 
 
 class TicketUpdate(BaseModel):

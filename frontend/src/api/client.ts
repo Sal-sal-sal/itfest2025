@@ -321,15 +321,27 @@ export interface Escalation {
   created_at: string
   operator_response?: string
   resolved_at?: string
+  responded_at?: string
   conversation_history?: Array<{ content: string; is_user: boolean }>
+  // New: list of all messages
+  client_messages?: Array<{ content: string; timestamp: string }>
+  operator_messages?: Array<{ content: string; timestamp: string }>
 }
 
 export const chatApi = {
-  send: (message: string, conversationHistory?: ChatMessage[], language = 'ru') =>
+  send: (message: string, conversationHistory?: ChatMessage[], language = 'ru', activeEscalationId?: string) =>
     api.post<ChatResponse>('/chat', {
       message,
       conversation_history: conversationHistory,
       language,
+      active_escalation_id: activeEscalationId,
+    }),
+  
+  // Send client message to escalation (when talking to operator)
+  sendToEscalation: (escalationId: string, message: string) =>
+    api.post<{ success: boolean; escalation: Escalation }>(`/chat/escalations/${escalationId}/messages`, {
+      escalation_id: escalationId,
+      message,
     }),
 
   searchKB: (query: string, topK = 3) =>
@@ -422,5 +434,16 @@ export const chatApi = {
       distribution: Record<number, number>
       satisfaction_rate: number
     }>('/chat/csat/stats'),
+
+  getCSATReviews: () =>
+    api.get<Array<{
+      escalation_id: string
+      rating: number
+      feedback: string | null
+      submitted_at: string
+      summary: string
+      department_name: string
+      resolved_at: string | null
+    }>>('/chat/csat/reviews'),
 }
 

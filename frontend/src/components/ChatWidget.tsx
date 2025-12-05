@@ -2,7 +2,6 @@ import { useState, useRef, useEffect } from 'react'
 import {
   X,
   Send,
-  Bot,
   Sparkles,
   RefreshCw,
   Minimize2,
@@ -20,6 +19,7 @@ interface Message {
   id: string
   content: string
   isBot: boolean
+  isOperator?: boolean  // true if message is from human operator
   timestamp: Date
   sources?: Array<{
     category: string
@@ -37,19 +37,108 @@ const quickActions = [
   { icon: <Zap className="h-4 w-4" />, label: 'Срочная проблема', action: 'urgent' },
 ]
 
+// LocalStorage keys
+const STORAGE_KEYS = {
+  MESSAGES: 'helpdesk_chat_messages',
+  ESCALATIONS: 'helpdesk_chat_escalations',
+  CSAT_SUBMITTED: 'helpdesk_chat_csat_submitted',
+  SESSION_ID: 'helpdesk_chat_session_id',
+  LANGUAGE: 'helpdesk_chat_language',
+}
+
+// Generate or get session ID
+const getSessionId = () => {
+  let sessionId = localStorage.getItem(STORAGE_KEYS.SESSION_ID)
+  if (!sessionId) {
+    sessionId = `session-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`
+    localStorage.setItem(STORAGE_KEYS.SESSION_ID, sessionId)
+  }
+  return sessionId
+}
+
+// Load messages from localStorage
+const loadMessages = (): Message[] => {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEYS.MESSAGES)
+    if (saved) {
+      const parsed = JSON.parse(saved)
+      // Convert timestamp strings back to Date objects
+      return parsed.map((m: Message & { timestamp: string }) => ({
+        ...m,
+        timestamp: new Date(m.timestamp),
+      }))
+    }
+  } catch (e) {
+    console.error('Error loading messages:', e)
+  }
+  return []
+}
+
+// Load escalations from localStorage
+const loadEscalations = (): string[] => {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEYS.ESCALATIONS)
+    return saved ? JSON.parse(saved) : []
+  } catch {
+    return []
+  }
+}
+
+// Load CSAT submitted from localStorage
+const loadCSATSubmitted = (): string[] => {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEYS.CSAT_SUBMITTED)
+    return saved ? JSON.parse(saved) : []
+  } catch {
+    return []
+  }
+}
+
+// Load language from localStorage
+const loadLanguage = (): 'ru' | 'kz' => {
+  const saved = localStorage.getItem(STORAGE_KEYS.LANGUAGE)
+  return saved === 'kz' ? 'kz' : 'ru'
+}
+
 export const ChatWidget = () => {
   const [isOpen, setIsOpen] = useState(false)
   const [isExpanded, setIsExpanded] = useState(false)
-  const [messages, setMessages] = useState<Message[]>([])
+  const [messages, setMessages] = useState<Message[]>(loadMessages)
   const [input, setInput] = useState('')
   const [isTyping, setIsTyping] = useState(false)
-  const [language, setLanguage] = useState<'ru' | 'kz'>('ru')
-  const [pendingEscalations, setPendingEscalations] = useState<string[]>([])
+  const [language, setLanguage] = useState<'ru' | 'kz'>(loadLanguage)
+  const [pendingEscalations, setPendingEscalations] = useState<string[]>(loadEscalations)
   const [showCSAT, setShowCSAT] = useState<string | null>(null) // escalation_id to rate
   const [csatRating, setCSATRating] = useState(0)
   const [csatFeedback, setCSATFeedback] = useState('')
-  const [csatSubmitted, setCSATSubmitted] = useState<string[]>([])
+  const [csatSubmitted, setCSATSubmitted] = useState<string[]>(loadCSATSubmitted)
+  const [sessionId] = useState(getSessionId)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  // Save messages to localStorage when they change
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(messages))
+  }, [messages])
+
+  // Save escalations to localStorage when they change
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.ESCALATIONS, JSON.stringify(pendingEscalations))
+  }, [pendingEscalations])
+
+  // Save CSAT submitted to localStorage when it changes
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.CSAT_SUBMITTED, JSON.stringify(csatSubmitted))
+  }, [csatSubmitted])
+
+  // Save language to localStorage when it changes
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.LANGUAGE, language)
+  }, [language])
+
+  // Log session ID for debugging
+  useEffect(() => {
+    console.log('Chat session ID:', sessionId)
+  }, [sessionId])
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -58,6 +147,9 @@ export const ChatWidget = () => {
   useEffect(() => {
     scrollToBottom()
   }, [messages])
+
+  // Track how many operator messages we've shown per escalation
+  const [shownMessageCounts, setShownMessageCounts] = useState<Record<string, number>>({})
 
   // Poll for operator responses on pending escalations
   useEffect(() => {
@@ -69,19 +161,36 @@ export const ChatWidget = () => {
           const response = await chatApi.getEscalation(escalationId)
           const escalation = response.data
 
-          // If operator responded
-          if (escalation.status === 'resolved' && escalation.operator_response) {
-            // Add operator message to chat
-            setMessages((prev) => [
+          // Check for new operator messages
+          const operatorMessages = escalation.operator_messages || []
+          const shownCount = shownMessageCounts[escalationId] || 0
+          
+          // Show any new operator messages
+          if (operatorMessages.length > shownCount) {
+            const newMessages = operatorMessages.slice(shownCount)
+            
+            newMessages.forEach((msg: { content: string; timestamp: string }, index: number) => {
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: `operator-${escalationId}-${shownCount + index}-${Date.now()}`,
+                  content: msg.content,
+                  isBot: true,
+                  isOperator: true,
+                  timestamp: new Date(msg.timestamp),
+                },
+              ])
+            })
+            
+            // Update shown count
+            setShownMessageCounts((prev) => ({
               ...prev,
-              {
-                id: `operator-${escalationId}`,
-                content: `👨‍💼 **Ответ оператора:**\n\n${escalation.operator_response}`,
-                isBot: true,
-                timestamp: new Date(),
-              },
-            ])
+              [escalationId]: operatorMessages.length,
+            }))
+          }
 
+          // Only remove from pending and show CSAT when resolved
+          if (escalation.status === 'resolved') {
             // Remove from pending
             setPendingEscalations((prev) => prev.filter((id) => id !== escalationId))
             
@@ -96,12 +205,12 @@ export const ChatWidget = () => {
       }
     }
 
-    // Check immediately and then every 5 seconds
+    // Check immediately and then every 3 seconds (faster polling for chat)
     checkForResponses()
-    const interval = setInterval(checkForResponses, 5000)
+    const interval = setInterval(checkForResponses, 3000)
 
     return () => clearInterval(interval)
-  }, [pendingEscalations, csatSubmitted])
+  }, [pendingEscalations, csatSubmitted, shownMessageCounts])
 
   // Submit CSAT rating
   const handleSubmitCSAT = async () => {
@@ -158,6 +267,12 @@ export const ChatWidget = () => {
     ])
   }
 
+  // Get active (non-resolved) escalation ID
+  const getActiveEscalationId = (): string | undefined => {
+    // Return the first pending escalation that's not resolved
+    return pendingEscalations.length > 0 ? pendingEscalations[0] : undefined
+  }
+
   const handleSend = async () => {
     if (!input.trim()) return
 
@@ -178,11 +293,30 @@ export const ChatWidget = () => {
     setIsTyping(true)
 
     try {
-      // Call RAG-powered chat API with Function Calling
+      const activeEscalation = getActiveEscalationId()
+      
+      // If there's an active escalation, message goes to operator
+      if (activeEscalation) {
+        // Send to operator via escalation
+        await chatApi.sendToEscalation(activeEscalation, userMessage)
+        
+        setTimeout(() => {
+          addBotMessage(
+            language === 'kz'
+              ? '📨 Сіздің хабарламаңыз операторға жіберілді. Жауабын күтіңіз.'
+              : '📨 Ваше сообщение отправлено оператору. Ожидайте ответа.'
+          )
+          setIsTyping(false)
+        }, 300)
+        return
+      }
+
+      // Otherwise, send to AI
       const response = await chatApi.send(
         userMessage,
         getConversationHistory(),
-        language
+        language,
+        activeEscalation
       )
 
       const { response: botResponse, sources, can_auto_resolve, tool_call } = response.data
@@ -273,9 +407,13 @@ export const ChatWidget = () => {
         {/* Button */}
         <button
           onClick={() => setIsOpen(true)}
-          className="flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-purple-500 to-brand-600 text-white shadow-lg transition-all duration-300 hover:scale-110 hover:shadow-xl"
+          className="flex h-16 w-16 items-center justify-center rounded-full overflow-hidden shadow-lg transition-all duration-300 hover:scale-110 hover:shadow-xl ring-4 ring-purple-500/30"
         >
-          <Bot className="h-8 w-8" />
+          <img
+            src="/images/ai-avatar.jpg"
+            alt="AI"
+            className="h-full w-full object-cover"
+          />
           {/* Pulse animation */}
           <span className="absolute inset-0 animate-ping rounded-full bg-purple-400 opacity-30" />
         </button>
@@ -295,8 +433,12 @@ export const ChatWidget = () => {
           {/* Header */}
           <div className="flex items-center justify-between border-b border-border/20 bg-gradient-to-r from-purple-500/10 to-brand-500/10 px-4 py-3">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500 to-brand-600 text-white">
-                <Bot className="h-5 w-5" />
+              <div className="h-10 w-10 overflow-hidden rounded-xl ring-2 ring-purple-500/30">
+                <img
+                  src="/images/ai-avatar.jpg"
+                  alt="AI"
+                  className="h-full w-full object-cover"
+                />
               </div>
               <div>
                 <h3 className="font-semibold text-foreground">AI Help Desk</h3>
@@ -329,6 +471,27 @@ export const ChatWidget = () => {
                   KZ
                 </button>
               </div>
+              {/* New chat button */}
+              {messages.length > 0 && (
+                <button
+                  onClick={() => {
+                    if (confirm('Начать новый чат? История будет очищена.')) {
+                      setMessages([])
+                      setPendingEscalations([])
+                      setShowCSAT(null)
+                      setCSATRating(0)
+                      setCSATFeedback('')
+                      // Generate new session
+                      const newSessionId = `session-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`
+                      localStorage.setItem(STORAGE_KEYS.SESSION_ID, newSessionId)
+                    }
+                  }}
+                  className="rounded-lg p-2 text-muted transition hover:bg-surface/80 hover:text-foreground"
+                  title="Новый чат"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                </button>
+              )}
               <button
                 onClick={() => window.open('/submit', '_blank')}
                 className="rounded-lg p-2 text-muted transition hover:bg-surface/80 hover:text-foreground"
@@ -355,8 +518,12 @@ export const ChatWidget = () => {
           <div className="flex-1 overflow-y-auto p-4">
             {messages.length === 0 ? (
               <div className="flex h-full flex-col items-center justify-center text-center">
-                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-purple-500 to-brand-600 text-white shadow-lg">
-                  <Bot className="h-8 w-8" />
+                <div className="mb-4 h-16 w-16 overflow-hidden rounded-2xl shadow-lg ring-4 ring-purple-500/30">
+                  <img
+                    src="/images/ai-avatar.jpg"
+                    alt="AI"
+                    className="h-full w-full object-cover"
+                  />
                 </div>
                 <h3 className="text-lg font-semibold text-foreground">
                   {language === 'kz' ? 'Сәлем! Мен AI-көмекші 👋' : 'Привет! Я AI-ассистент 👋'}
@@ -392,10 +559,20 @@ export const ChatWidget = () => {
                 {messages.map((message) => (
                   <div
                     key={message.id}
-                    className={`flex ${message.isBot ? 'justify-start' : 'justify-end'}`}
+                    className={`flex items-end gap-2 ${message.isBot ? 'justify-start' : 'justify-end'}`}
                   >
+                    {/* Avatar for bot messages - outside container */}
+                    {message.isBot && (
+                      <div className="flex-shrink-0">
+                        <img
+                          src="/images/ai-avatar.jpg"
+                          alt="AI"
+                          className="h-8 w-8 rounded-full object-cover ring-2 ring-purple-500/20"
+                        />
+                      </div>
+                    )}
                     <div
-                      className={`max-w-[85%] rounded-2xl px-4 py-3 ${
+                      className={`max-w-[80%] rounded-2xl px-4 py-3 ${
                         message.isBot
                           ? 'bg-surface border border-border/30 text-foreground'
                           : 'bg-gradient-to-br from-purple-500 to-brand-600 text-white'
@@ -403,8 +580,9 @@ export const ChatWidget = () => {
                     >
                       {message.isBot && (
                         <div className="mb-2 flex items-center gap-2">
-                          <Bot className="h-4 w-4 text-purple-500" />
-                          <span className="text-xs font-medium text-purple-500">AI-ассистент</span>
+                          <span className="text-xs font-medium text-purple-500">
+                            AI-ассистент
+                          </span>
                           {message.canAutoResolve && (
                             <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-600 dark:text-emerald-400">
                               ✓ Решено
@@ -503,10 +681,16 @@ export const ChatWidget = () => {
                 ))}
 
                 {isTyping && (
-                  <div className="flex justify-start">
+                  <div className="flex items-end gap-2 justify-start">
+                    <div className="flex-shrink-0">
+                      <img
+                        src="/images/ai-avatar.jpg"
+                        alt="AI"
+                        className="h-8 w-8 rounded-full object-cover ring-2 ring-purple-500/20"
+                      />
+                    </div>
                     <div className="rounded-2xl border border-border/30 bg-surface px-4 py-3">
                       <div className="flex items-center gap-2">
-                        <Bot className="h-4 w-4 text-purple-500" />
                         <span className="text-xs text-muted">AI думает</span>
                         <div className="flex gap-1">
                           <span className="h-2 w-2 animate-bounce rounded-full bg-purple-500 [animation-delay:0ms]" />
