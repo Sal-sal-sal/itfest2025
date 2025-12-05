@@ -6,6 +6,7 @@ import { TicketsListPage } from './pages/TicketsListPage'
 import { TicketViewPage } from './pages/TicketViewPage'
 import { SubmitTicketPage } from './pages/SubmitTicketPage'
 import { DepartmentsPage } from './pages/DepartmentsPage'
+import { OperatorPage } from './pages/OperatorPage'
 import { ThemeToggle } from './components/ThemeToggle'
 import { ParticleBackground } from './components/ParticleBackground'
 import { ChatWidget } from './components/ChatWidget'
@@ -17,6 +18,7 @@ import {
   MessageSquarePlus,
   Menu,
   X,
+  Headphones,
 } from 'lucide-react'
 import { useState } from 'react'
 
@@ -28,6 +30,7 @@ const publicNavLinks = [
 
 const operatorNavLinks = [
   { href: '/dashboard', label: 'Дашборд', icon: <LayoutDashboard className="h-4 w-4" /> },
+  { href: '/operator', label: 'Оператор', icon: <Headphones className="h-4 w-4" /> },
   { href: '/tickets', label: 'Тикеты', icon: <Inbox className="h-4 w-4" /> },
   { href: '/departments', label: 'Департаменты', icon: <Building2 className="h-4 w-4" /> },
 ]
@@ -39,6 +42,7 @@ function App() {
   // Determine if we're in operator panel or public site
   const isOperatorPanel =
     location.pathname.startsWith('/dashboard') ||
+    location.pathname.startsWith('/operator') ||
     location.pathname.startsWith('/tickets') ||
     location.pathname.startsWith('/departments')
 
@@ -173,6 +177,7 @@ function App() {
             <Route path="/" element={<LandingPage />} />
             <Route path="/submit" element={<SubmitTicketPage />} />
             <Route path="/dashboard" element={<DashboardPage />} />
+            <Route path="/operator" element={<OperatorPage />} />
             <Route path="/tickets" element={<TicketsListPage />} />
             <Route path="/tickets/:id" element={<TicketViewPage />} />
             <Route path="/departments" element={<DepartmentsPage />} />

@@ -265,6 +265,25 @@ export interface ChatMessage {
   is_user: boolean
 }
 
+export interface ToolCallResult {
+  name: string
+  args: Record<string, unknown>
+  result: {
+    success: boolean
+    action?: string
+    message: string
+    escalation_id?: string
+    ticket_number?: string
+    department?: string
+    department_name?: string
+    priority?: string
+    reason?: string
+    summary?: string
+    subject?: string
+    status?: string
+  }
+}
+
 export interface ChatResponse {
   response: string
   sources: Array<{
@@ -274,6 +293,7 @@ export interface ChatResponse {
   }>
   can_auto_resolve: boolean
   suggested_priority: string
+  tool_call?: ToolCallResult | null
 }
 
 export interface KBCategory {
@@ -285,6 +305,23 @@ export interface KBCategory {
     name: string
     article_count: number
   }>
+}
+
+// Escalation type for operators
+export interface Escalation {
+  id: string
+  escalation_id: string
+  client_message: string
+  summary: string
+  reason: string
+  department: string
+  department_name: string
+  priority: 'low' | 'medium' | 'high' | 'critical'
+  status: 'pending' | 'in_progress' | 'resolved'
+  created_at: string
+  operator_response?: string
+  resolved_at?: string
+  conversation_history?: Array<{ content: string; is_user: boolean }>
 }
 
 export const chatApi = {
@@ -325,5 +362,17 @@ export const chatApi = {
     model: string
     categories_count: number
   }>('/chat/health'),
+
+  // Escalations API for operators
+  getEscalations: (status?: string) =>
+    api.get<Escalation[]>('/chat/escalations', { params: status ? { status } : {} }),
+
+  getEscalation: (id: string) => api.get<Escalation>(`/chat/escalations/${id}`),
+
+  updateEscalation: (id: string, data: { status?: string; operator_response?: string }) =>
+    api.patch<{ success: boolean; escalation?: Escalation }>(`/chat/escalations/${id}`, data),
+
+  deleteEscalation: (id: string) =>
+    api.delete<{ success: boolean; message?: string }>(`/chat/escalations/${id}`),
 }
 

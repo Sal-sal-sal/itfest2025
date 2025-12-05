@@ -1,6 +1,8 @@
 """RAG (Retrieval-Augmented Generation) сервис с иерархической структурой."""
 
 import json
+import uuid
+from datetime import datetime
 from typing import Any
 import httpx
 
@@ -8,6 +10,118 @@ from ...core.config import get_settings
 from ...schemas.ticket import TicketPriority
 
 settings = get_settings()
+
+
+# ============================================================================
+# OpenAI Tools (Function Calling) для эскалации
+# ============================================================================
+
+ESCALATION_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "escalate_to_operator",
+            "description": """Передать обращение оператору (человеку) когда:
+- Вопрос слишком сложный или специфичный
+- Требуется доступ к внутренним системам
+- Клиент явно просит поговорить с человеком
+- Проблема требует ручного вмешательства
+- Не удаётся найти ответ в базе знаний
+- Срочная или критическая проблема""",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Причина эскалации (почему AI не может помочь)"
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Краткое резюме проблемы клиента"
+                    },
+                    "department": {
+                        "type": "string",
+                        "enum": ["it_support", "hr", "finance", "facilities"],
+                        "description": "Рекомендуемый отдел для обработки"
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "critical"],
+                        "description": "Приоритет обращения"
+                    },
+                    "suggested_category": {
+                        "type": "string",
+                        "description": "Предполагаемая категория проблемы"
+                    }
+                },
+                "required": ["reason", "summary", "department", "priority"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_ticket",
+            "description": """Создать тикет в системе когда:
+- Клиент хочет оставить заявку
+- Проблема требует отслеживания
+- Нужно зафиксировать обращение для истории""",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "subject": {
+                        "type": "string",
+                        "description": "Тема тикета (краткое описание)"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Полное описание проблемы"
+                    },
+                    "department": {
+                        "type": "string",
+                        "enum": ["it_support", "hr", "finance", "facilities"],
+                        "description": "Отдел для обработки"
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "critical"],
+                        "description": "Приоритет тикета"
+                    },
+                    "client_email": {
+                        "type": "string",
+                        "description": "Email клиента (если известен)"
+                    }
+                },
+                "required": ["subject", "description", "department", "priority"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_ticket_status",
+            "description": "Проверить статус существующего тикета по номеру",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticket_number": {
+                        "type": "string",
+                        "description": "Номер тикета (например, TKT-241205-ABCD)"
+                    }
+                },
+                "required": ["ticket_number"]
+            }
+        }
+    }
+]
+
+# Маппинг отделов
+DEPARTMENT_MAPPING = {
+    "it_support": {"id": "it", "name": "IT Поддержка", "name_kz": "IT Қолдау"},
+    "hr": {"id": "hr", "name": "HR / Кадры", "name_kz": "HR / Кадрлар"},
+    "finance": {"id": "finance", "name": "Финансы", "name_kz": "Қаржы"},
+    "facilities": {"id": "facilities", "name": "АХО", "name_kz": "ШҚБ"},
+}
 
 
 # Иерархическая база знаний
@@ -365,7 +479,7 @@ class RAGService:
         language: str = "ru",
     ) -> dict[str, Any]:
         """
-        Основной метод чата с RAG.
+        Основной метод чата с RAG и Function Calling.
         
         Returns:
             {
@@ -373,6 +487,7 @@ class RAGService:
                 "sources": list,
                 "can_auto_resolve": bool,
                 "suggested_priority": str,
+                "tool_call": dict | None,  # Информация об эскалации/тикете
             }
         """
         # Шаг 1: Поиск в базе знаний
@@ -385,11 +500,21 @@ class RAGService:
         can_auto_resolve = any(r.get("can_auto_resolve", False) for r in search_results)
         suggested_priority = search_results[0]["priority"] if search_results else "medium"
         
-        # Шаг 3: Генерация ответа
+        # Шаг 3: Генерация ответа (с поддержкой tools)
+        tool_call_result = None
+        
         if self.use_openai:
-            response = await self._generate_with_openai(
+            ai_result = await self._generate_with_openai(
                 message, context, conversation_history, language
             )
+            response = ai_result["content"]
+            tool_call_result = ai_result.get("tool_call")
+            
+            # Если был tool call, обновляем приоритет из результата
+            if tool_call_result:
+                can_auto_resolve = False  # Эскалированные кейсы не авто-решаются
+                if tool_call_result.get("result", {}).get("priority"):
+                    suggested_priority = tool_call_result["result"]["priority"]
         else:
             response = self._generate_fallback(message, search_results, language)
         
@@ -405,6 +530,7 @@ class RAGService:
             ],
             "can_auto_resolve": can_auto_resolve,
             "suggested_priority": suggested_priority,
+            "tool_call": tool_call_result,  # Информация об эскалации/тикете
         }
 
     async def _generate_with_openai(
@@ -413,11 +539,38 @@ class RAGService:
         context: str,
         conversation_history: list[dict[str, str]] | None,
         language: str,
-    ) -> str:
-        """Генерация ответа через OpenAI."""
+        use_tools: bool = True,
+    ) -> dict[str, Any]:
+        """
+        Генерация ответа через OpenAI с поддержкой Function Calling.
+        
+        Returns:
+            {
+                "content": str,           # Текст ответа
+                "tool_call": dict | None, # Информация о вызове инструмента
+            }
+        """
         
         system_prompt = SYSTEM_PROMPT_KZ if language == "kz" else SYSTEM_PROMPT
         system_prompt = system_prompt.format(context=context)
+        
+        # Добавляем инструкции по использованию tools
+        system_prompt += """
+
+ВАЖНО: У тебя есть инструменты (tools) для помощи пользователям:
+1. escalate_to_operator - передать сложный случай оператору-человеку
+2. create_ticket - создать тикет в системе
+3. check_ticket_status - проверить статус тикета
+
+Используй escalate_to_operator если:
+- Ты не можешь помочь или не уверен в ответе
+- Пользователь просит поговорить с человеком
+- Проблема требует ручного вмешательства
+- Это срочная/критическая ситуация
+
+Используй create_ticket если:
+- Пользователь хочет оставить заявку
+- Проблема требует отслеживания"""
         
         messages = [{"role": "system", "content": system_prompt}]
         
@@ -430,6 +583,18 @@ class RAGService:
         # Добавляем текущее сообщение
         messages.append({"role": "user", "content": message})
         
+        request_body = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 1000,
+        }
+        
+        # Добавляем tools если включены
+        if use_tools:
+            request_body["tools"] = ESCALATION_TOOLS
+            request_body["tool_choice"] = "auto"
+        
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -438,21 +603,209 @@ class RAGService:
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
                     },
-                    json={
-                        "model": self.model,
-                        "messages": messages,
-                        "temperature": 0.7,
-                        "max_tokens": 1000,
-                    },
+                    json=request_body,
                     timeout=30.0,
                 )
                 response.raise_for_status()
                 data = response.json()
-                return data["choices"][0]["message"]["content"]
+                
+                choice = data["choices"][0]
+                message_data = choice["message"]
+                
+                # Проверяем, был ли вызван tool
+                if message_data.get("tool_calls"):
+                    tool_call = message_data["tool_calls"][0]
+                    function_name = tool_call["function"]["name"]
+                    function_args = json.loads(tool_call["function"]["arguments"])
+                    
+                    # Обрабатываем tool call
+                    tool_result = await self._handle_tool_call(
+                        function_name, function_args, language
+                    )
+                    
+                    return {
+                        "content": tool_result["message"],
+                        "tool_call": {
+                            "name": function_name,
+                            "args": function_args,
+                            "result": tool_result,
+                        }
+                    }
+                
+                # Обычный ответ без tool call
+                return {
+                    "content": message_data.get("content", ""),
+                    "tool_call": None,
+                }
                 
         except Exception as e:
             print(f"OpenAI error: {e}")
-            return self._generate_fallback(message, [], language)
+            return {
+                "content": self._generate_fallback(message, [], language),
+                "tool_call": None,
+            }
+
+    async def _handle_tool_call(
+        self,
+        function_name: str,
+        function_args: dict,
+        language: str,
+    ) -> dict[str, Any]:
+        """Обработка вызова инструмента."""
+        
+        if function_name == "escalate_to_operator":
+            return await self._escalate_to_operator(function_args, language)
+        
+        elif function_name == "create_ticket":
+            return await self._create_ticket(function_args, language)
+        
+        elif function_name == "check_ticket_status":
+            return await self._check_ticket_status(function_args, language)
+        
+        return {
+            "success": False,
+            "message": "Неизвестный инструмент",
+        }
+
+    async def _escalate_to_operator(
+        self,
+        args: dict,
+        language: str,
+    ) -> dict[str, Any]:
+        """Эскалация обращения оператору."""
+        
+        department = args.get("department", "it_support")
+        dept_info = DEPARTMENT_MAPPING.get(department, DEPARTMENT_MAPPING["it_support"])
+        priority = args.get("priority", "medium")
+        reason = args.get("reason", "")
+        summary = args.get("summary", "")
+        
+        # Генерируем номер эскалации
+        escalation_id = f"ESC-{datetime.now().strftime('%y%m%d')}-{uuid.uuid4().hex[:4].upper()}"
+        
+        if language == "kz":
+            message = f"""🔄 **Сіздің өтінішіңіз операторға жіберілді**
+
+📋 **Эскалация нөмірі:** {escalation_id}
+🏢 **Бөлім:** {dept_info['name_kz']}
+⚡ **Басымдық:** {priority}
+
+📝 **Мәселе сипаттамасы:**
+{summary}
+
+⏱️ Оператор жақын арада сізбен байланысады.
+Күту уақыты: шамамен 15-30 минут."""
+        else:
+            message = f"""🔄 **Ваше обращение передано оператору**
+
+📋 **Номер эскалации:** {escalation_id}
+🏢 **Отдел:** {dept_info['name']}
+⚡ **Приоритет:** {priority}
+
+📝 **Описание проблемы:**
+{summary}
+
+⏱️ Оператор свяжется с вами в ближайшее время.
+Ожидаемое время ответа: около 15-30 минут."""
+        
+        return {
+            "success": True,
+            "action": "escalated",
+            "escalation_id": escalation_id,
+            "department": department,
+            "department_name": dept_info["name"],
+            "priority": priority,
+            "reason": reason,
+            "summary": summary,
+            "message": message,
+        }
+
+    async def _create_ticket(
+        self,
+        args: dict,
+        language: str,
+    ) -> dict[str, Any]:
+        """Создание тикета."""
+        
+        subject = args.get("subject", "Новое обращение")
+        description = args.get("description", "")
+        department = args.get("department", "it_support")
+        priority = args.get("priority", "medium")
+        
+        dept_info = DEPARTMENT_MAPPING.get(department, DEPARTMENT_MAPPING["it_support"])
+        
+        # Генерируем номер тикета
+        ticket_number = f"TKT-{datetime.now().strftime('%y%m%d')}-{uuid.uuid4().hex[:4].upper()}"
+        
+        if language == "kz":
+            message = f"""✅ **Тикет сәтті жасалды!**
+
+🎫 **Тикет нөмірі:** {ticket_number}
+📋 **Тақырып:** {subject}
+🏢 **Бөлім:** {dept_info['name_kz']}
+⚡ **Басымдық:** {priority}
+
+Сіз бұл нөмір бойынша өтініштің күйін тексере аласыз.
+Біздің мамандар сізге жақын арада жауап береді."""
+        else:
+            message = f"""✅ **Тикет успешно создан!**
+
+🎫 **Номер тикета:** {ticket_number}
+📋 **Тема:** {subject}
+🏢 **Отдел:** {dept_info['name']}
+⚡ **Приоритет:** {priority}
+
+Вы можете проверить статус заявки по этому номеру.
+Наши специалисты ответят вам в ближайшее время."""
+        
+        return {
+            "success": True,
+            "action": "ticket_created",
+            "ticket_number": ticket_number,
+            "subject": subject,
+            "department": department,
+            "priority": priority,
+            "message": message,
+        }
+
+    async def _check_ticket_status(
+        self,
+        args: dict,
+        language: str,
+    ) -> dict[str, Any]:
+        """Проверка статуса тикета (заглушка)."""
+        
+        ticket_number = args.get("ticket_number", "")
+        
+        # В реальности здесь был бы запрос к БД
+        # Пока возвращаем демо-ответ
+        
+        if language == "kz":
+            message = f"""🔍 **Тикет күйі: {ticket_number}**
+
+📊 **Күйі:** Өңделуде
+🏢 **Бөлім:** IT Қолдау
+👤 **Жауапты:** Техникалық маман
+⏱️ **Жасалған:** Бүгін
+
+💬 Сіздің өтінішіңіз өңделуде. Жаңартулар болған кезде хабарлаймыз."""
+        else:
+            message = f"""🔍 **Статус тикета: {ticket_number}**
+
+📊 **Статус:** В обработке
+🏢 **Отдел:** IT Поддержка
+👤 **Ответственный:** Технический специалист
+⏱️ **Создан:** Сегодня
+
+💬 Ваша заявка находится в работе. Мы уведомим вас о любых обновлениях."""
+        
+        return {
+            "success": True,
+            "action": "status_checked",
+            "ticket_number": ticket_number,
+            "status": "processing",
+            "message": message,
+        }
 
     def _generate_fallback(
         self,

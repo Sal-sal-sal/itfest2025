@@ -13,7 +13,7 @@ import {
   Zap,
   BookOpen,
 } from 'lucide-react'
-import { chatApi, type ChatMessage as APIChatMessage } from '../api/client'
+import { chatApi, type ChatMessage as APIChatMessage, type ToolCallResult } from '../api/client'
 
 interface Message {
   id: string
@@ -26,6 +26,7 @@ interface Message {
     question: string
   }>
   canAutoResolve?: boolean
+  toolCall?: ToolCallResult | null
 }
 
 const quickActions = [
@@ -42,6 +43,7 @@ export const ChatWidget = () => {
   const [input, setInput] = useState('')
   const [isTyping, setIsTyping] = useState(false)
   const [language, setLanguage] = useState<'ru' | 'kz'>('ru')
+  const [pendingEscalations, setPendingEscalations] = useState<string[]>([])
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   const scrollToBottom = () => {
@@ -51,6 +53,45 @@ export const ChatWidget = () => {
   useEffect(() => {
     scrollToBottom()
   }, [messages])
+
+  // Poll for operator responses on pending escalations
+  useEffect(() => {
+    if (pendingEscalations.length === 0) return
+
+    const checkForResponses = async () => {
+      for (const escalationId of pendingEscalations) {
+        try {
+          const response = await chatApi.getEscalation(escalationId)
+          const escalation = response.data
+
+          // If operator responded
+          if (escalation.status === 'resolved' && escalation.operator_response) {
+            // Add operator message to chat
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `operator-${escalationId}`,
+                content: `👨‍💼 **Ответ оператора:**\n\n${escalation.operator_response}`,
+                isBot: true,
+                timestamp: new Date(),
+              },
+            ])
+
+            // Remove from pending
+            setPendingEscalations((prev) => prev.filter((id) => id !== escalationId))
+          }
+        } catch (error) {
+          console.error('Error checking escalation:', error)
+        }
+      }
+    }
+
+    // Check immediately and then every 5 seconds
+    checkForResponses()
+    const interval = setInterval(checkForResponses, 5000)
+
+    return () => clearInterval(interval)
+  }, [pendingEscalations])
 
   // Convert messages to API format
   const getConversationHistory = (): APIChatMessage[] => {
@@ -63,7 +104,8 @@ export const ChatWidget = () => {
   const addBotMessage = (
     content: string,
     sources?: Message['sources'],
-    canAutoResolve?: boolean
+    canAutoResolve?: boolean,
+    toolCall?: ToolCallResult | null
   ) => {
     setMessages((prev) => [
       ...prev,
@@ -74,6 +116,7 @@ export const ChatWidget = () => {
         timestamp: new Date(),
         sources,
         canAutoResolve,
+        toolCall,
       },
     ])
   }
@@ -98,17 +141,25 @@ export const ChatWidget = () => {
     setIsTyping(true)
 
     try {
-      // Call RAG-powered chat API
+      // Call RAG-powered chat API with Function Calling
       const response = await chatApi.send(
         userMessage,
         getConversationHistory(),
         language
       )
 
-      const { response: botResponse, sources, can_auto_resolve } = response.data
+      const { response: botResponse, sources, can_auto_resolve, tool_call } = response.data
+
+      // If escalation was created, track it for polling operator response
+      if (tool_call && tool_call.name === 'escalate_to_operator' && tool_call.result?.escalation_id) {
+        setPendingEscalations((prev) => [...prev, tool_call.result.escalation_id as string])
+      }
+      if (tool_call && tool_call.name === 'create_ticket' && tool_call.result?.ticket_number) {
+        setPendingEscalations((prev) => [...prev, tool_call.result.ticket_number as string])
+      }
 
       setTimeout(() => {
-        addBotMessage(botResponse, sources, can_auto_resolve)
+        addBotMessage(botResponse, sources, can_auto_resolve, tool_call)
         setIsTyping(false)
       }, 500)
     } catch (error) {
@@ -326,8 +377,64 @@ export const ChatWidget = () => {
                       )}
                       <p className="whitespace-pre-wrap text-sm">{message.content}</p>
                       
+                      {/* Tool Call Info (Escalation/Ticket) */}
+                      {message.toolCall && message.toolCall.result && (
+                        <div className={`mt-3 rounded-lg p-3 ${
+                          message.toolCall.name === 'escalate_to_operator'
+                            ? 'bg-amber-500/10 border border-amber-500/30'
+                            : message.toolCall.name === 'create_ticket'
+                            ? 'bg-emerald-500/10 border border-emerald-500/30'
+                            : 'bg-blue-500/10 border border-blue-500/30'
+                        }`}>
+                          {message.toolCall.name === 'escalate_to_operator' && (
+                            <div className="space-y-2">
+                              <div className="flex items-center gap-2">
+                                <span className="text-lg">🔄</span>
+                                <span className="font-medium text-amber-600 dark:text-amber-400">
+                                  Передано оператору
+                                </span>
+                              </div>
+                              <div className="text-xs space-y-1 text-muted">
+                                <p>📋 Номер: <span className="font-mono text-foreground">{message.toolCall.result.escalation_id}</span></p>
+                                <p>🏢 Отдел: {message.toolCall.result.department_name}</p>
+                                <p>⚡ Приоритет: {message.toolCall.result.priority}</p>
+                              </div>
+                            </div>
+                          )}
+                          {message.toolCall.name === 'create_ticket' && (
+                            <div className="space-y-2">
+                              <div className="flex items-center gap-2">
+                                <span className="text-lg">🎫</span>
+                                <span className="font-medium text-emerald-600 dark:text-emerald-400">
+                                  Тикет создан
+                                </span>
+                              </div>
+                              <div className="text-xs space-y-1 text-muted">
+                                <p>📋 Номер: <span className="font-mono text-foreground">{message.toolCall.result.ticket_number}</span></p>
+                                <p>📝 Тема: {message.toolCall.result.subject}</p>
+                                <p>⚡ Приоритет: {message.toolCall.result.priority}</p>
+                              </div>
+                            </div>
+                          )}
+                          {message.toolCall.name === 'check_ticket_status' && (
+                            <div className="space-y-2">
+                              <div className="flex items-center gap-2">
+                                <span className="text-lg">🔍</span>
+                                <span className="font-medium text-blue-600 dark:text-blue-400">
+                                  Статус тикета
+                                </span>
+                              </div>
+                              <div className="text-xs space-y-1 text-muted">
+                                <p>📋 Номер: <span className="font-mono text-foreground">{message.toolCall.result.ticket_number}</span></p>
+                                <p>📊 Статус: {message.toolCall.result.status}</p>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      
                       {/* Sources */}
-                      {message.sources && message.sources.length > 0 && (
+                      {message.sources && message.sources.length > 0 && !message.toolCall && (
                         <div className="mt-3 border-t border-border/20 pt-2">
                           <p className="text-xs text-muted mb-1">📚 Источники:</p>
                           <div className="space-y-1">
