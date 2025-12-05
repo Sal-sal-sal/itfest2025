@@ -278,6 +278,7 @@ export const DashboardPage = () => {
               { key: 'chat', label: 'Чат', icon: '💬' },
               { key: 'phone', label: 'Телефон', icon: '📞' },
               { key: 'telegram', label: 'Telegram', icon: '📱' },
+              { key: 'whatsapp', label: 'WhatsApp', icon: '💚' },
             ].map(({ key, label, icon }) => (
               <div
                 key={key}

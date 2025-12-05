@@ -11,7 +11,11 @@ settings = get_settings()
 engine: AsyncEngine = create_async_engine(
     settings.sqlalchemy_database_uri,
     echo=settings.debug,
-    pool_pre_ping=True,
+    pool_pre_ping=True,  # Проверять соединение перед использованием
+    pool_size=5,  # Минимум соединений в пуле
+    max_overflow=10,  # Дополнительные соединения при нагрузке
+    pool_recycle=300,  # Переподключаться каждые 5 минут
+    pool_timeout=30,  # Таймаут ожидания соединения
     future=True,
 )
 

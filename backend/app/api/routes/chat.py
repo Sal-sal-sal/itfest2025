@@ -11,6 +11,7 @@ from ...services.AI import rag_service
 from ...services.ticket_service import TicketService
 from ...schemas.ticket import TicketCreate, TicketPriority, TicketSource
 from ...db.session import get_session
+from ...services.integrations.twilio_whatsapp import twilio_whatsapp_service
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -516,6 +517,7 @@ class GenerateSuggestionRequest(BaseModel):
 async def update_escalation(
     escalation_id: str,
     request: UpdateEscalationRequest,
+    session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """
     Обновить статус эскалации (для оператора).
@@ -523,14 +525,67 @@ async def update_escalation(
     Позволяет:
     - Изменить статус (pending -> in_progress -> resolved)
     - Добавить ответ оператора (добавляется в список сообщений)
+    
+    Также синхронизирует статус с тикетом в базе данных.
     """
+    from ...models.ticket import Ticket, TicketStatus
+    from sqlalchemy import select
+    import uuid
+    
     for i, escalation in enumerate(escalations_store):
         if escalation["escalation_id"] == escalation_id or escalation["id"] == escalation_id:
             if request.status:
                 escalations_store[i]["status"] = request.status
-                # Set resolved_at only when status becomes resolved
+                
+                # Синхронизируем статус с тикетом в БД
+                ticket_id = escalations_store[i].get("ticket_id")
+                if ticket_id:
+                    try:
+                        result = await session.execute(
+                            select(Ticket).where(Ticket.id == uuid.UUID(ticket_id))
+                        )
+                        db_ticket = result.scalar_one_or_none()
+                        
+                        if db_ticket:
+                            if request.status == "in_progress":
+                                # Оператор взял в работу - тикет больше не "новый"
+                                db_ticket.status = TicketStatus.PROCESSING
+                                db_ticket.first_response_at = db_ticket.first_response_at or datetime.now()
+                            elif request.status == "resolved":
+                                # Оператор решил тикет
+                                db_ticket.status = TicketStatus.RESOLVED
+                                db_ticket.resolved_at = datetime.now()
+                                escalations_store[i]["resolved_at"] = datetime.now().isoformat()
+                            elif request.status == "pending":
+                                # Вернули в ожидание
+                                db_ticket.status = TicketStatus.NEW
+                            
+                            await session.commit()
+                    except Exception as e:
+                        print(f"Error updating ticket status in DB: {e}")
+                        import traceback
+                        traceback.print_exc()
+                
+                # Set resolved_at for escalation
                 if request.status == "resolved":
                     escalations_store[i]["resolved_at"] = datetime.now().isoformat()
+                    
+                    # Если это WhatsApp эскалация — уведомляем клиента и очищаем маппинг
+                    if escalations_store[i].get("source") == "whatsapp":
+                        phone_number = escalations_store[i].get("phone_number")
+                        if phone_number:
+                            try:
+                                await twilio_whatsapp_service.send_message(
+                                    phone_number,
+                                    "✅ Ваше обращение решено. Спасибо за обращение!\n\nЕсли у вас есть новые вопросы, просто напишите нам."
+                                )
+                                # Очищаем маппинг — теперь новые сообщения пойдут к AI
+                                from .integrations.twilio_whatsapp import phone_to_escalation
+                                if phone_number in phone_to_escalation:
+                                    del phone_to_escalation[phone_number]
+                            except Exception as e:
+                                print(f"Error notifying WhatsApp client about resolution: {e}")
+                    
             if request.operator_response:
                 # Store ALL operator messages in a list
                 if "operator_messages" not in escalations_store[i]:
@@ -539,9 +594,47 @@ async def update_escalation(
                     "content": request.operator_response,
                     "timestamp": datetime.now().isoformat(),
                 })
+                # Also add to conversation history
+                escalations_store[i]["conversation_history"].append({
+                    "content": request.operator_response,
+                    "is_user": False,
+                    "is_operator": True,
+                })
                 # Also update the latest response for compatibility
                 escalations_store[i]["operator_response"] = request.operator_response
                 escalations_store[i]["responded_at"] = datetime.now().isoformat()
+                
+                # ============================================================
+                # Если эскалация из WhatsApp — отправляем ответ в WhatsApp
+                # ============================================================
+                if escalations_store[i].get("source") == "whatsapp":
+                    phone_number = escalations_store[i].get("phone_number")
+                    if phone_number:
+                        try:
+                            # Формируем ответ оператора
+                            operator_message = f"👨‍💼 Оператор:\n\n{request.operator_response}"
+                            await twilio_whatsapp_service.send_message(phone_number, operator_message)
+                            print(f"Operator response sent to WhatsApp: {phone_number}")
+                        except Exception as e:
+                            print(f"Error sending operator response to WhatsApp: {e}")
+                
+                # Обновляем first_response_at в БД если это первый ответ
+                ticket_id = escalations_store[i].get("ticket_id")
+                if ticket_id:
+                    try:
+                        result = await session.execute(
+                            select(Ticket).where(Ticket.id == uuid.UUID(ticket_id))
+                        )
+                        db_ticket = result.scalar_one_or_none()
+                        if db_ticket and not db_ticket.first_response_at:
+                            db_ticket.first_response_at = datetime.now()
+                            # Также меняем статус на "в обработке" если был "новый"
+                            if db_ticket.status == TicketStatus.NEW:
+                                db_ticket.status = TicketStatus.PROCESSING
+                            await session.commit()
+                    except Exception as e:
+                        print(f"Error updating ticket first_response_at: {e}")
+                        
             return {"success": True, "escalation": escalations_store[i]}
     
     return {"success": False, "error": "Эскалация не найдена"}

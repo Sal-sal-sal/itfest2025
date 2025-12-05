@@ -565,9 +565,9 @@ export const ChatWidget = () => {
                     {message.isBot && (
                       <div className="flex-shrink-0">
                         <img
-                          src="/images/ai-avatar.jpg"
-                          alt="AI"
-                          className="h-8 w-8 rounded-full object-cover ring-2 ring-purple-500/20"
+                          src={message.isOperator ? '/images/operator-avatar.webp' : '/images/ai-avatar.jpg'}
+                          alt={message.isOperator ? 'Оператор' : 'AI'}
+                          className={`h-8 w-8 rounded-full object-cover ring-2 ${message.isOperator ? 'ring-emerald-500/20' : 'ring-purple-500/20'}`}
                         />
                       </div>
                     )}
@@ -580,8 +580,8 @@ export const ChatWidget = () => {
                     >
                       {message.isBot && (
                         <div className="mb-2 flex items-center gap-2">
-                          <span className="text-xs font-medium text-purple-500">
-                            AI-ассистент
+                          <span className={`text-xs font-medium ${message.isOperator ? 'text-emerald-500' : 'text-purple-500'}`}>
+                            {message.isOperator ? '👨‍💼 Оператор' : '🤖 AI-ассистент'}
                           </span>
                           {message.canAutoResolve && (
                             <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-600 dark:text-emerald-400">

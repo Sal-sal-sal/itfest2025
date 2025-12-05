@@ -29,6 +29,7 @@ class TicketSource(str, Enum):
     PORTAL = "portal"
     PHONE = "phone"
     TELEGRAM = "telegram"
+    WHATSAPP = "whatsapp"
 
 
 # Department schemas
@@ -245,6 +246,7 @@ class SourceDistribution(BaseModel):
     portal: int
     phone: int
     telegram: int
+    whatsapp: int
 
 
 class DashboardStats(BaseModel):

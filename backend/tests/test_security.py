@@ -21,3 +21,4 @@ def test_access_and_refresh_tokens_have_different_types() -> None:
     assert refresh_payload["type"] == "refresh"
     assert access_payload["sub"] == refresh_payload["sub"] == subject
 
+

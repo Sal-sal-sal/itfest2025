@@ -353,13 +353,19 @@ class TicketService:
         
         priority_distribution = PriorityDistribution(**priority_dist)
         
-        # Распределение по источникам
-        source_dist = {}
-        for source in TicketSource:
-            result = await self.session.execute(
-                select(func.count(Ticket.id)).where(Ticket.source == source)
+        # Распределение по источникам - один запрос для всех источников
+        source_dist = {source.value: 0 for source in TicketSource}
+        try:
+            source_counts_result = await self.session.execute(
+                select(Ticket.source, func.count(Ticket.id))
+                .group_by(Ticket.source)
             )
-            source_dist[source.value] = result.scalar() or 0
+            for source_value, count in source_counts_result.all():
+                if source_value:
+                    source_dist[source_value.value if hasattr(source_value, 'value') else source_value] = count
+        except Exception as e:
+            print(f"Warning: Could not query source distribution: {e}")
+            await self.session.rollback()
         
         source_distribution = SourceDistribution(**source_dist)
         

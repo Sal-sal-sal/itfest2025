@@ -46,6 +46,29 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
 
+    # WhatsApp Business API (Meta)
+    WHATSAPP_PHONE_NUMBER_ID: str | None = Field(default=None)
+    WHATSAPP_ACCESS_TOKEN: str | None = Field(default=None)
+    WHATSAPP_VERIFY_TOKEN: str = Field(default="helpdesk_verify_token")
+    
+    # Twilio WhatsApp (альтернатива Meta API)
+    TWILIO_ACCOUNT_SID: str | None = Field(default=None)
+    TWILIO_AUTH_TOKEN: str | None = Field(default=None)
+    TWILIO_WHATSAPP_NUMBER: str | None = Field(default=None)  # например: +14155238886
+    
+    # Twilio Voice (голосовой бот)
+    TWILIO_VOICE_NUMBER: str | None = Field(default=None)  # Номер для приёма звонков
+    OPERATOR_PHONE_NUMBER: str | None = Field(default=None)  # Номер оператора для перевода звонков
+
+    # Email (IMAP/SMTP)
+    EMAIL_IMAP_SERVER: str | None = Field(default=None)
+    EMAIL_IMAP_PORT: int = Field(default=993)
+    EMAIL_SMTP_SERVER: str | None = Field(default=None)
+    EMAIL_SMTP_PORT: int = Field(default=587)
+    EMAIL_ADDRESS: str | None = Field(default=None)
+    EMAIL_PASSWORD: str | None = Field(default=None)
+    COMPANY_NAME: str = Field(default="Help Desk")
+
     @property
     def sqlalchemy_database_uri(self) -> str:
         """Асинхронная строка подключения для SQLAlchemy/asyncpg."""

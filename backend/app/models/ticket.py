@@ -36,6 +36,7 @@ class TicketSource(str, enum.Enum):
     PORTAL = "portal"
     PHONE = "phone"
     TELEGRAM = "telegram"
+    WHATSAPP = "whatsapp"
 
 
 class Department(Base):

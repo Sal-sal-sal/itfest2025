@@ -123,6 +123,7 @@ export interface SourceDistribution {
   portal: number
   phone: number
   telegram: number
+  whatsapp: number
 }
 
 export interface DashboardStats {
