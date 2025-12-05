@@ -527,6 +527,24 @@ class RAGService:
                 "tool_call": dict | None,  # Информация об эскалации/тикете
             }
         """
+        # Проверяем кеш Redis (только для простых запросов без истории)
+        from ...core.redis import redis_service
+        
+        use_cache = conversation_history is None or len(conversation_history) == 0
+        
+        if use_cache:
+            cached = await redis_service.get_cached_rag_response(message, language)
+            if cached:
+                # Возвращаем кешированный результат (без tool_call для безопасности)
+                return {
+                    "response": cached.get("response", ""),
+                    "sources": cached.get("sources", []),
+                    "can_auto_resolve": cached.get("can_auto_resolve", False),
+                    "suggested_priority": cached.get("suggested_priority", "medium"),
+                    "tool_call": None,
+                    "_cached": True,
+                }
+        
         # Шаг 1: Поиск в базе знаний
         search_results = self.search_knowledge_base(message)
         
@@ -555,7 +573,7 @@ class RAGService:
         else:
             response = self._generate_fallback(message, search_results, language)
         
-        return {
+        result = {
             "response": response,
             "sources": [
                 {
@@ -569,6 +587,12 @@ class RAGService:
             "suggested_priority": suggested_priority,
             "tool_call": tool_call_result,  # Информация об эскалации/тикете
         }
+        
+        # Кешируем результат если нет tool_call и есть авто-решение
+        if use_cache and not tool_call_result and can_auto_resolve:
+            await redis_service.cache_rag_response(message, result, language)
+        
+        return result
 
     async def _generate_with_openai(
         self,

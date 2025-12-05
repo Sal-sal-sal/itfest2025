@@ -12,15 +12,17 @@ from ...services.ticket_service import TicketService
 from ...schemas.ticket import TicketCreate, TicketPriority, TicketSource
 from ...db.session import get_session
 from ...services.integrations.twilio_whatsapp import twilio_whatsapp_service
+from ...services.escalation_store import escalation_store
+from ...core.redis import redis_service
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
 # ============================================================================
-# In-memory storage для эскалаций (в продакшене - база данных)
+# Deprecated: In-memory fallback (используется escalation_store с Redis)
 # ============================================================================
-escalations_store: list[dict[str, Any]] = []
+escalations_store: list[dict[str, Any]] = []  # Kept for backward compatibility
 
 
 class ChatMessage(BaseModel):
@@ -80,21 +82,9 @@ async def add_client_message(
     Добавить сообщение клиента в эскалацию.
     Используется когда клиент уже общается с оператором.
     """
-    for i, escalation in enumerate(escalations_store):
-        if escalation["escalation_id"] == escalation_id or escalation["id"] == escalation_id:
-            # Add client message to conversation history
-            if "client_messages" not in escalations_store[i]:
-                escalations_store[i]["client_messages"] = []
-            escalations_store[i]["client_messages"].append({
-                "content": request.message,
-                "timestamp": datetime.now().isoformat(),
-            })
-            # Also update conversation_history
-            escalations_store[i]["conversation_history"].append({
-                "content": request.message,
-                "is_user": True,
-            })
-            return {"success": True, "escalation": escalations_store[i]}
+    result = await escalation_store.add_client_message(escalation_id, request.message)
+    if result:
+        return {"success": True, "escalation": result}
     
     return {"success": False, "error": "Эскалация не найдена"}
 
@@ -120,29 +110,17 @@ async def chat(
     active_escalation_id = request.active_escalation_id if hasattr(request, 'active_escalation_id') else None
     
     if active_escalation_id:
-        # Find the escalation
-        for i, escalation in enumerate(escalations_store):
-            if escalation["escalation_id"] == active_escalation_id:
-                # This message goes to the operator, not AI
-                if "client_messages" not in escalations_store[i]:
-                    escalations_store[i]["client_messages"] = []
-                escalations_store[i]["client_messages"].append({
-                    "content": request.message,
-                    "timestamp": datetime.now().isoformat(),
-                })
-                escalations_store[i]["conversation_history"].append({
-                    "content": request.message,
-                    "is_user": True,
-                })
-                
-                # Return a waiting message
-                return ChatResponse(
-                    response="📨 Ваше сообщение отправлено оператору. Ожидайте ответа.",
-                    sources=[],
-                    can_auto_resolve=False,
-                    suggested_priority="medium",
-                    tool_call=None,
-                )
+        # Find the escalation and add message
+        result = await escalation_store.add_client_message(active_escalation_id, request.message)
+        if result:
+            # Return a waiting message
+            return ChatResponse(
+                response="📨 Ваше сообщение отправлено оператору. Ожидайте ответа.",
+                sources=[],
+                can_auto_resolve=False,
+                suggested_priority="medium",
+                tool_call=None,
+            )
     
     history = None
     if request.conversation_history:
@@ -195,8 +173,10 @@ async def chat(
             import traceback
             traceback.print_exc()
         
+        # Генерируем уникальный ID для Redis
+        import uuid as uuid_module
         escalation = {
-            "id": str(len(escalations_store) + 1),
+            "id": str(uuid_module.uuid4()),
             "escalation_id": ticket_number,
             "client_message": request.message,
             "summary": tool_result.get("summary", ""),
@@ -214,7 +194,7 @@ async def chat(
             "operator_messages": [],
             "ticket_id": ticket_id,  # Связь с БД тикетом
         }
-        escalations_store.append(escalation)
+        await escalation_store.add(escalation)
     
     # Если был tool_call с созданием тикета - сохраняем в базу данных
     if result.get("tool_call") and result["tool_call"].get("name") == "create_ticket":
@@ -265,9 +245,10 @@ async def chat(
             import traceback
             traceback.print_exc()
         
-        # Также сохраняем для оператора (in-memory)
+        # Также сохраняем для оператора (Redis/memory)
+        import uuid as uuid_module
         escalation = {
-            "id": str(len(escalations_store) + 1),
+            "id": str(uuid_module.uuid4()),
             "escalation_id": ticket_number or tool_result.get("ticket_number"),
             "client_message": request.message,
             "summary": tool_result.get("subject", ""),
@@ -285,7 +266,7 @@ async def chat(
             "operator_messages": [],
             "ticket_id": ticket_id,  # Связь с БД тикетом
         }
-        escalations_store.append(escalation)
+        await escalation_store.add(escalation)
     
     # Если был tool_call с отметкой "решено AI" - создаём/обновляем тикет как авто-решённый
     if result.get("tool_call") and result["tool_call"].get("name") == "mark_resolved_by_ai":
@@ -426,29 +407,17 @@ async def get_ai_stats() -> dict[str, Any]:
     
     Возвращает метрики работы AI системы.
     """
-    total_escalations = len(escalations_store)
-    pending = len([e for e in escalations_store if e["status"] == "pending"])
-    in_progress = len([e for e in escalations_store if e["status"] == "in_progress"])
-    resolved = len([e for e in escalations_store if e["status"] == "resolved"])
-    
-    # Статистика по департаментам
-    by_department: dict[str, int] = {}
-    by_priority: dict[str, int] = {"low": 0, "medium": 0, "high": 0, "critical": 0}
-    
-    for e in escalations_store:
-        dept = e.get("department", "unknown")
-        by_department[dept] = by_department.get(dept, 0) + 1
-        priority = e.get("priority", "medium")
-        by_priority[priority] = by_priority.get(priority, 0) + 1
+    # Получаем статистику из escalation_store
+    stats = await escalation_store.get_stats()
     
     return {
-        "total_escalations": total_escalations,
-        "pending_escalations": pending,
-        "in_progress_escalations": in_progress,
-        "resolved_escalations": resolved,
-        "resolution_rate": resolved / total_escalations if total_escalations > 0 else 0,
-        "by_department": by_department,
-        "by_priority": by_priority,
+        "total_escalations": stats["total"],
+        "pending_escalations": stats["pending"],
+        "in_progress_escalations": stats["in_progress"],
+        "resolved_escalations": stats["resolved"],
+        "resolution_rate": stats["resolved"] / stats["total"] if stats["total"] > 0 else 0,
+        "by_department": stats["by_department"],
+        "by_priority": stats["by_priority"],
         "ai_enabled": rag_service.use_openai,
         "ai_model": rag_service.model,
         "knowledge_base_categories": len(rag_service.knowledge_base),
@@ -457,6 +426,8 @@ async def get_ai_stats() -> dict[str, Any]:
             for cat in rag_service.knowledge_base.values()
             for sub in cat.get("subcategories", {}).values()
         ),
+        "storage_backend": stats["storage"],
+        "redis_connected": redis_service.is_connected,
     }
 
 
@@ -472,17 +443,15 @@ async def get_escalations(status: str | None = None) -> list[dict[str, Any]]:
     Args:
         status: Фильтр по статусу (pending, in_progress, resolved)
     """
-    if status:
-        return [e for e in escalations_store if e["status"] == status]
-    return escalations_store
+    return await escalation_store.get_all(status)
 
 
 @router.get("/escalations/{escalation_id}")
 async def get_escalation(escalation_id: str) -> dict[str, Any]:
     """Получить детали эскалации по ID."""
-    for escalation in escalations_store:
-        if escalation["escalation_id"] == escalation_id or escalation["id"] == escalation_id:
-            return escalation
+    result = await escalation_store.get_by_id(escalation_id)
+    if result:
+        return result
     return {"error": "Эскалация не найдена"}
 
 
@@ -537,125 +506,100 @@ async def update_escalation(
     from sqlalchemy import select
     import uuid
     
-    for i, escalation in enumerate(escalations_store):
-        if escalation["escalation_id"] == escalation_id or escalation["id"] == escalation_id:
-            if request.status:
-                escalations_store[i]["status"] = request.status
-                
-                # Синхронизируем статус с тикетом в БД
-                ticket_id = escalations_store[i].get("ticket_id")
-                if ticket_id:
-                    try:
-                        result = await session.execute(
-                            select(Ticket).where(Ticket.id == uuid.UUID(ticket_id))
-                        )
-                        db_ticket = result.scalar_one_or_none()
-                        
-                        if db_ticket:
-                            if request.status == "in_progress":
-                                # Оператор взял в работу - тикет больше не "новый"
-                                db_ticket.status = TicketStatus.PROCESSING
-                                db_ticket.first_response_at = db_ticket.first_response_at or datetime.now()
-                            elif request.status == "resolved":
-                                # Оператор решил тикет
-                                db_ticket.status = TicketStatus.RESOLVED
-                                db_ticket.resolved_at = datetime.now()
-                                escalations_store[i]["resolved_at"] = datetime.now().isoformat()
-                            elif request.status == "pending":
-                                # Вернули в ожидание
-                                db_ticket.status = TicketStatus.NEW
-                            
-                            await session.commit()
-                    except Exception as e:
-                        print(f"Error updating ticket status in DB: {e}")
-                        import traceback
-                        traceback.print_exc()
-                
-                # Set resolved_at for escalation
-                if request.status == "resolved":
-                    escalations_store[i]["resolved_at"] = datetime.now().isoformat()
-                    
-                    # Если это WhatsApp эскалация — уведомляем клиента и очищаем маппинг
-                    if escalations_store[i].get("source") == "whatsapp":
-                        phone_number = escalations_store[i].get("phone_number")
-                        if phone_number:
-                            try:
-                                await twilio_whatsapp_service.send_message(
-                                    phone_number,
-                                    "✅ Ваше обращение решено. Спасибо за обращение!\n\nЕсли у вас есть новые вопросы, просто напишите нам."
-                                )
-                                # Очищаем маппинг — теперь новые сообщения пойдут к AI
-                                from .integrations.twilio_whatsapp import phone_to_escalation
-                                if phone_number in phone_to_escalation:
-                                    del phone_to_escalation[phone_number]
-                            except Exception as e:
-                                print(f"Error notifying WhatsApp client about resolution: {e}")
-                    
-            if request.operator_response:
-                # Store ALL operator messages in a list
-                if "operator_messages" not in escalations_store[i]:
-                    escalations_store[i]["operator_messages"] = []
-                escalations_store[i]["operator_messages"].append({
-                    "content": request.operator_response,
-                    "timestamp": datetime.now().isoformat(),
-                })
-                # Also add to conversation history
-                escalations_store[i]["conversation_history"].append({
-                    "content": request.operator_response,
-                    "is_user": False,
-                    "is_operator": True,
-                })
-                # Also update the latest response for compatibility
-                escalations_store[i]["operator_response"] = request.operator_response
-                escalations_store[i]["responded_at"] = datetime.now().isoformat()
-                
-                # ============================================================
-                # Если эскалация из WhatsApp — отправляем ответ в WhatsApp
-                # ============================================================
-                if escalations_store[i].get("source") == "whatsapp":
-                    phone_number = escalations_store[i].get("phone_number")
-                    if phone_number:
-                        try:
-                            # Формируем ответ оператора
-                            operator_message = f"👨‍💼 Оператор:\n\n{request.operator_response}"
-                            await twilio_whatsapp_service.send_message(phone_number, operator_message)
-                            print(f"Operator response sent to WhatsApp: {phone_number}")
-                        except Exception as e:
-                            print(f"Error sending operator response to WhatsApp: {e}")
-                
-                # Обновляем first_response_at в БД если это первый ответ
-                ticket_id = escalations_store[i].get("ticket_id")
-                if ticket_id:
-                    try:
-                        result = await session.execute(
-                            select(Ticket).where(Ticket.id == uuid.UUID(ticket_id))
-                        )
-                        db_ticket = result.scalar_one_or_none()
-                        if db_ticket and not db_ticket.first_response_at:
-                            db_ticket.first_response_at = datetime.now()
-                            # Также меняем статус на "в обработке" если был "новый"
-                            if db_ticket.status == TicketStatus.NEW:
-                                db_ticket.status = TicketStatus.PROCESSING
-                            await session.commit()
-                    except Exception as e:
-                        print(f"Error updating ticket first_response_at: {e}")
-                        
-            return {"success": True, "escalation": escalations_store[i]}
+    # Получаем эскалацию
+    escalation = await escalation_store.get_by_id(escalation_id)
+    if not escalation:
+        return {"success": False, "error": "Эскалация не найдена"}
     
-    return {"success": False, "error": "Эскалация не найдена"}
+    if request.status:
+        # Обновляем статус
+        await escalation_store.set_status(escalation_id, request.status)
+        escalation["status"] = request.status
+        
+        # Синхронизируем статус с тикетом в БД
+        ticket_id = escalation.get("ticket_id")
+        if ticket_id:
+            try:
+                result = await session.execute(
+                    select(Ticket).where(Ticket.id == uuid.UUID(ticket_id))
+                )
+                db_ticket = result.scalar_one_or_none()
+                
+                if db_ticket:
+                    if request.status == "in_progress":
+                        db_ticket.status = TicketStatus.PROCESSING
+                        db_ticket.first_response_at = db_ticket.first_response_at or datetime.now()
+                    elif request.status == "resolved":
+                        db_ticket.status = TicketStatus.RESOLVED
+                        db_ticket.resolved_at = datetime.now()
+                    elif request.status == "pending":
+                        db_ticket.status = TicketStatus.NEW
+                    
+                    await session.commit()
+            except Exception as e:
+                print(f"Error updating ticket status in DB: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # Если resolved и WhatsApp эскалация — уведомляем клиента
+        if request.status == "resolved" and escalation.get("source") == "whatsapp":
+            phone_number = escalation.get("phone_number")
+            if phone_number:
+                try:
+                    await twilio_whatsapp_service.send_message(
+                        phone_number,
+                        "✅ Ваше обращение решено. Спасибо за обращение!\n\nЕсли у вас есть новые вопросы, просто напишите нам."
+                    )
+                    from .integrations.twilio_whatsapp import phone_to_escalation
+                    if phone_number in phone_to_escalation:
+                        del phone_to_escalation[phone_number]
+                except Exception as e:
+                    print(f"Error notifying WhatsApp client about resolution: {e}")
+    
+    if request.operator_response:
+        # Добавляем ответ оператора
+        updated = await escalation_store.add_operator_message(escalation_id, request.operator_response)
+        if updated:
+            escalation = updated
+        
+        # Если WhatsApp эскалация — отправляем ответ
+        if escalation.get("source") == "whatsapp":
+            phone_number = escalation.get("phone_number")
+            if phone_number:
+                try:
+                    operator_message = f"👨‍💼 Оператор:\n\n{request.operator_response}"
+                    await twilio_whatsapp_service.send_message(phone_number, operator_message)
+                    print(f"Operator response sent to WhatsApp: {phone_number}")
+                except Exception as e:
+                    print(f"Error sending operator response to WhatsApp: {e}")
+        
+        # Обновляем first_response_at в БД если это первый ответ
+        ticket_id = escalation.get("ticket_id")
+        if ticket_id:
+            try:
+                result = await session.execute(
+                    select(Ticket).where(Ticket.id == uuid.UUID(ticket_id))
+                )
+                db_ticket = result.scalar_one_or_none()
+                if db_ticket and not db_ticket.first_response_at:
+                    db_ticket.first_response_at = datetime.now()
+                    if db_ticket.status == TicketStatus.NEW:
+                        db_ticket.status = TicketStatus.PROCESSING
+                    await session.commit()
+            except Exception as e:
+                print(f"Error updating ticket first_response_at: {e}")
+    
+    # Получаем обновлённую эскалацию
+    updated_escalation = await escalation_store.get_by_id(escalation_id)
+    return {"success": True, "escalation": updated_escalation or escalation}
 
 
 @router.delete("/escalations/{escalation_id}")
 async def delete_escalation(escalation_id: str) -> dict[str, Any]:
     """Удалить эскалацию (после решения)."""
-    global escalations_store
-    initial_len = len(escalations_store)
-    escalations_store = [
-        e for e in escalations_store
-        if e["escalation_id"] != escalation_id and e["id"] != escalation_id
-    ]
+    success = await escalation_store.delete(escalation_id)
     
-    if len(escalations_store) < initial_len:
+    if success:
         return {"success": True, "message": "Эскалация удалена"}
     return {"success": False, "error": "Эскалация не найдена"}
 
@@ -712,11 +656,7 @@ async def analyze_conversation(request: AnalyzeConversationRequest) -> dict[str,
     - Предложение для добавления в базу знаний
     """
     # Найти эскалацию
-    escalation = None
-    for e in escalations_store:
-        if e["escalation_id"] == request.escalation_id or e["id"] == request.escalation_id:
-            escalation = e
-            break
+    escalation = await escalation_store.get_by_id(request.escalation_id)
     
     if not escalation:
         return {"success": False, "error": "Эскалация не найдена"}
@@ -766,15 +706,17 @@ async def submit_csat(request: CSATRatingRequest) -> dict[str, Any]:
     Rating: 1-5 звёзд
     """
     # Найти эскалацию и добавить оценку
-    for escalation in escalations_store:
-        if escalation["escalation_id"] == request.escalation_id:
-            escalation["csat_rating"] = request.rating
-            escalation["csat_feedback"] = request.feedback
-            escalation["csat_submitted_at"] = datetime.now().isoformat()
-            return {
-                "success": True,
-                "message": "Спасибо за вашу оценку!",
-            }
+    updated = await escalation_store.update(request.escalation_id, {
+        "csat_rating": request.rating,
+        "csat_feedback": request.feedback,
+        "csat_submitted_at": datetime.utcnow().isoformat() + "Z",
+    })
+    
+    if updated:
+        return {
+            "success": True,
+            "message": "Спасибо за вашу оценку!",
+        }
     
     return {"success": False, "error": "Эскалация не найдена"}
 
@@ -786,7 +728,8 @@ async def get_csat_stats() -> dict[str, Any]:
     
     Возвращает средний балл и распределение оценок.
     """
-    ratings = [e.get("csat_rating") for e in escalations_store if e.get("csat_rating")]
+    all_escalations = await escalation_store.get_all()
+    ratings = [e.get("csat_rating") for e in all_escalations if e.get("csat_rating")]
     
     if not ratings:
         return {
@@ -819,8 +762,9 @@ async def get_csat_reviews() -> list[dict[str, Any]]:
     
     Возвращает список отзывов, отсортированных по дате.
     """
+    all_escalations = await escalation_store.get_all()
     reviews = []
-    for e in escalations_store:
+    for e in all_escalations:
         if e.get("csat_rating"):
             reviews.append({
                 "escalation_id": e.get("escalation_id"),
@@ -835,4 +779,37 @@ async def get_csat_reviews() -> list[dict[str, Any]]:
     # Sort by submission date (newest first)
     reviews.sort(key=lambda x: x.get("submitted_at", ""), reverse=True)
     return reviews
+
+
+# ============================================================================
+# Redis Stats
+# ============================================================================
+
+@router.get("/redis/stats")
+async def get_redis_stats() -> dict[str, Any]:
+    """
+    Получить статистику Redis.
+    
+    Показывает:
+    - Статус подключения
+    - Количество эскалаций
+    - Количество кешированных RAG ответов
+    - Количество сессий
+    """
+    return await redis_service.get_stats()
+
+
+@router.post("/redis/invalidate-cache")
+async def invalidate_rag_cache() -> dict[str, Any]:
+    """
+    Инвалидировать кеш RAG.
+    
+    Используется после добавления новых статей в базу знаний.
+    """
+    count = await redis_service.invalidate_rag_cache()
+    return {
+        "success": True,
+        "invalidated_entries": count,
+        "message": f"Инвалидировано {count} записей кеша",
+    }
 
