@@ -1,0 +1,89 @@
+@import url('https://fonts.cdnfonts.com/css/bold-serif');
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --color-background: 250 250 252;
+  --color-surface: 255 255 255;
+  --color-foreground: 15 23 42;
+  --color-muted: 100 116 139;
+  --color-accent: 139 92 246;
+}
+
+:root.dark {
+  color-scheme: dark;
+  --color-background: 3 7 18;
+  --color-surface: 15 23 42;
+  --color-foreground: 241 245 249;
+  --color-muted: 148 163 184;
+  --color-accent: 167 139 250;
+}
+
+@layer base {
+  * {
+    @apply border-border/30;
+  }
+
+  body {
+    @apply m-0 min-h-screen bg-background font-sans text-base text-foreground antialiased;
+    background-image: 
+      radial-gradient(circle at 15% 15%, rgba(139, 92, 246, 0.12), transparent 40%),
+      radial-gradient(circle at 85% 10%, rgba(99, 102, 241, 0.15), transparent 35%),
+      radial-gradient(circle at 50% 80%, rgba(14, 165, 233, 0.08), transparent 50%);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply font-serif font-semibold tracking-tight text-foreground;
+  }
+
+  #root {
+    @apply min-h-screen;
+  }
+
+  ::selection {
+    background: rgba(139, 92, 246, 0.35);
+    color: rgb(var(--color-surface));
+  }
+}
+
+@layer components {
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  
+  ::-webkit-scrollbar-track {
+    background: rgb(var(--color-surface) / 0.5);
+  }
+  
+  ::-webkit-scrollbar-thumb {
+    background: rgb(var(--color-muted) / 0.3);
+    border-radius: 4px;
+  }
+  
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgb(var(--color-muted) / 0.5);
+  }
+
+  /* Form inputs focus styles */
+  input:focus,
+  textarea:focus,
+  select:focus {
+    @apply ring-1 ring-brand-400/50;
+  }
+
+  /* Button press effect */
+  button:active:not(:disabled) {
+    transform: scale(0.98);
+  }
+}
