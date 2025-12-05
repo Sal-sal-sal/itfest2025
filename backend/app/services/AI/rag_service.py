@@ -870,6 +870,141 @@ class RAGService:
             })
         return result
 
+    async def summarize(self, text: str, language: str = "ru") -> str:
+        """
+        Резюмирование текста с помощью AI.
+        """
+        if not self.use_openai:
+            # Fallback: первые 200 символов
+            return text[:200] + "..." if len(text) > 200 else text
+        
+        prompt = "Резюмируй следующий текст кратко и по существу:" if language == "ru" else "Мәтінді қысқаша түйіндеңіз:"
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": prompt},
+                            {"role": "user", "content": text},
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": 300,
+                    },
+                    timeout=30.0,
+                )
+                response.raise_for_status()
+                data = response.json()
+                return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            print(f"Summarize error: {e}")
+            return text[:200] + "..." if len(text) > 200 else text
+
+    async def translate(self, text: str, target_language: str) -> str:
+        """
+        Перевод текста между русским и казахским.
+        """
+        if not self.use_openai:
+            return f"[Перевод недоступен] {text}"
+        
+        if target_language == "kz":
+            prompt = "Переведи следующий текст на казахский язык. Отвечай только переводом:"
+        else:
+            prompt = "Келесі мәтінді орыс тіліне аударыңыз. Тек аударманы жазыңыз:"
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": prompt},
+                            {"role": "user", "content": text},
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": 1000,
+                    },
+                    timeout=30.0,
+                )
+                response.raise_for_status()
+                data = response.json()
+                return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            print(f"Translate error: {e}")
+            return f"[Ошибка перевода] {text}"
+
+    async def generate_response_suggestion(
+        self,
+        client_message: str,
+        context: str | None = None,
+        language: str = "ru",
+    ) -> str:
+        """
+        Генерация подсказки ответа для оператора.
+        """
+        # Сначала ищем в базе знаний
+        search_results = self.search_knowledge_base(client_message)
+        kb_context = self.build_context(search_results)
+        
+        if not self.use_openai:
+            # Fallback: возвращаем лучший ответ из базы знаний
+            if search_results:
+                return search_results[0]["answer"]
+            return "Рекомендую уточнить детали проблемы у клиента."
+        
+        system_prompt = f"""Ты - помощник оператора службы поддержки. 
+Сгенерируй профессиональный и вежливый ответ на сообщение клиента.
+
+Контекст из базы знаний:
+{kb_context}
+
+{f"Дополнительный контекст: {context}" if context else ""}
+
+Требования:
+- Ответ должен быть на {'русском' if language == 'ru' else 'казахском'} языке
+- Вежливый и профессиональный тон
+- Конкретные шаги решения если возможно
+- Предложение помощи в конце"""
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": f"Сообщение клиента: {client_message}"},
+                        ],
+                        "temperature": 0.7,
+                        "max_tokens": 500,
+                    },
+                    timeout=30.0,
+                )
+                response.raise_for_status()
+                data = response.json()
+                return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            print(f"Suggestion error: {e}")
+            if search_results:
+                return search_results[0]["answer"]
+            return "Рекомендую уточнить детали проблемы у клиента."
+
 
 # Singleton instance
 rag_service = RAGService()

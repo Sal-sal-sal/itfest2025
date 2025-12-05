@@ -363,6 +363,38 @@ export const chatApi = {
     categories_count: number
   }>('/chat/health'),
 
+  // AI Stats
+  getStats: () => api.get<{
+    total_escalations: number
+    pending_escalations: number
+    in_progress_escalations: number
+    resolved_escalations: number
+    resolution_rate: number
+    by_department: Record<string, number>
+    by_priority: Record<string, number>
+    ai_enabled: boolean
+    ai_model: string
+    knowledge_base_categories: number
+    knowledge_base_articles: number
+  }>('/chat/stats'),
+
+  // AI Tools for operators
+  summarize: (text: string, language = 'ru') =>
+    api.post<{ summary: string }>('/chat/summarize', { text, language }),
+
+  translate: (text: string, targetLanguage: string) =>
+    api.post<{ translated: string; target_language: string }>('/chat/translate', {
+      text,
+      target_language: targetLanguage,
+    }),
+
+  suggestResponse: (clientMessage: string, context?: string, language = 'ru') =>
+    api.post<{ suggestion: string }>('/chat/suggest-response', {
+      client_message: clientMessage,
+      context,
+      language,
+    }),
+
   // Escalations API for operators
   getEscalations: (status?: string) =>
     api.get<Escalation[]>('/chat/escalations', { params: status ? { status } : {} }),
@@ -374,5 +406,21 @@ export const chatApi = {
 
   deleteEscalation: (id: string) =>
     api.delete<{ success: boolean; message?: string }>(`/chat/escalations/${id}`),
+
+  // CSAT (Customer Satisfaction Score)
+  submitCSAT: (escalationId: string, rating: number, feedback?: string) =>
+    api.post<{ success: boolean; message: string }>('/chat/csat', {
+      escalation_id: escalationId,
+      rating,
+      feedback,
+    }),
+
+  getCSATStats: () =>
+    api.get<{
+      average: number
+      total_responses: number
+      distribution: Record<number, number>
+      satisfaction_rate: number
+    }>('/chat/csat/stats'),
 }
 

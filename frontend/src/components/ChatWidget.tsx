@@ -12,6 +12,7 @@ import {
   FileText,
   Zap,
   BookOpen,
+  Star,
 } from 'lucide-react'
 import { chatApi, type ChatMessage as APIChatMessage, type ToolCallResult } from '../api/client'
 
@@ -44,6 +45,10 @@ export const ChatWidget = () => {
   const [isTyping, setIsTyping] = useState(false)
   const [language, setLanguage] = useState<'ru' | 'kz'>('ru')
   const [pendingEscalations, setPendingEscalations] = useState<string[]>([])
+  const [showCSAT, setShowCSAT] = useState<string | null>(null) // escalation_id to rate
+  const [csatRating, setCSATRating] = useState(0)
+  const [csatFeedback, setCSATFeedback] = useState('')
+  const [csatSubmitted, setCSATSubmitted] = useState<string[]>([])
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   const scrollToBottom = () => {
@@ -79,6 +84,11 @@ export const ChatWidget = () => {
 
             // Remove from pending
             setPendingEscalations((prev) => prev.filter((id) => id !== escalationId))
+            
+            // Show CSAT form if not already submitted
+            if (!csatSubmitted.includes(escalationId)) {
+              setShowCSAT(escalationId)
+            }
           }
         } catch (error) {
           console.error('Error checking escalation:', error)
@@ -91,7 +101,34 @@ export const ChatWidget = () => {
     const interval = setInterval(checkForResponses, 5000)
 
     return () => clearInterval(interval)
-  }, [pendingEscalations])
+  }, [pendingEscalations, csatSubmitted])
+
+  // Submit CSAT rating
+  const handleSubmitCSAT = async () => {
+    if (!showCSAT || csatRating === 0) return
+
+    try {
+      await chatApi.submitCSAT(showCSAT, csatRating, csatFeedback || undefined)
+      
+      // Add thank you message
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `csat-thanks-${showCSAT}`,
+          content: `⭐ Спасибо за вашу оценку (${csatRating}/5)! Мы ценим ваш отзыв и постоянно улучшаем качество обслуживания.`,
+          isBot: true,
+          timestamp: new Date(),
+        },
+      ])
+
+      setCSATSubmitted((prev) => [...prev, showCSAT])
+      setShowCSAT(null)
+      setCSATRating(0)
+      setCSATFeedback('')
+    } catch (error) {
+      console.error('Error submitting CSAT:', error)
+    }
+  }
 
   // Convert messages to API format
   const getConversationHistory = (): APIChatMessage[] => {
@@ -485,6 +522,60 @@ export const ChatWidget = () => {
               </div>
             )}
           </div>
+
+          {/* CSAT Rating Form */}
+          {showCSAT && (
+            <div className="border-t border-border/20 bg-gradient-to-r from-amber-500/10 to-yellow-500/10 p-4">
+              <div className="text-center">
+                <p className="text-sm font-medium text-foreground mb-2">
+                  ⭐ Оцените качество обслуживания
+                </p>
+                <div className="flex justify-center gap-1 mb-3">
+                  {[1, 2, 3, 4, 5].map((star) => (
+                    <button
+                      key={star}
+                      onClick={() => setCSATRating(star)}
+                      className="p-1 transition hover:scale-110"
+                    >
+                      <Star
+                        className={`h-8 w-8 ${
+                          star <= csatRating
+                            ? 'fill-yellow-400 text-yellow-400'
+                            : 'text-gray-300 dark:text-gray-600'
+                        }`}
+                      />
+                    </button>
+                  ))}
+                </div>
+                <input
+                  type="text"
+                  value={csatFeedback}
+                  onChange={(e) => setCSATFeedback(e.target.value)}
+                  placeholder="Оставьте комментарий (необязательно)"
+                  className="w-full rounded-lg border border-border/30 bg-background px-3 py-2 text-sm text-foreground placeholder-muted focus:border-brand-500 focus:outline-none mb-3"
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      setShowCSAT(null)
+                      setCSATRating(0)
+                      setCSATFeedback('')
+                    }}
+                    className="flex-1 rounded-lg border border-border/30 px-4 py-2 text-sm font-medium text-muted transition hover:bg-surface"
+                  >
+                    Пропустить
+                  </button>
+                  <button
+                    onClick={handleSubmitCSAT}
+                    disabled={csatRating === 0}
+                    className="flex-1 rounded-lg bg-gradient-to-r from-amber-500 to-yellow-500 px-4 py-2 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-50"
+                  >
+                    Отправить
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Input */}
           <div className="border-t border-border/20 bg-background/50 p-4">

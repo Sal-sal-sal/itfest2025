@@ -188,6 +188,47 @@ async def health_check() -> dict[str, Any]:
     }
 
 
+@router.get("/stats")
+async def get_ai_stats() -> dict[str, Any]:
+    """
+    Статистика AI для Dashboard.
+    
+    Возвращает метрики работы AI системы.
+    """
+    total_escalations = len(escalations_store)
+    pending = len([e for e in escalations_store if e["status"] == "pending"])
+    in_progress = len([e for e in escalations_store if e["status"] == "in_progress"])
+    resolved = len([e for e in escalations_store if e["status"] == "resolved"])
+    
+    # Статистика по департаментам
+    by_department: dict[str, int] = {}
+    by_priority: dict[str, int] = {"low": 0, "medium": 0, "high": 0, "critical": 0}
+    
+    for e in escalations_store:
+        dept = e.get("department", "unknown")
+        by_department[dept] = by_department.get(dept, 0) + 1
+        priority = e.get("priority", "medium")
+        by_priority[priority] = by_priority.get(priority, 0) + 1
+    
+    return {
+        "total_escalations": total_escalations,
+        "pending_escalations": pending,
+        "in_progress_escalations": in_progress,
+        "resolved_escalations": resolved,
+        "resolution_rate": resolved / total_escalations if total_escalations > 0 else 0,
+        "by_department": by_department,
+        "by_priority": by_priority,
+        "ai_enabled": rag_service.use_openai,
+        "ai_model": rag_service.model,
+        "knowledge_base_categories": len(rag_service.knowledge_base),
+        "knowledge_base_articles": sum(
+            len(sub.get("articles", []))
+            for cat in rag_service.knowledge_base.values()
+            for sub in cat.get("subcategories", {}).values()
+        ),
+    }
+
+
 # ============================================================================
 # API для операторов - управление эскалациями
 # ============================================================================
@@ -217,6 +258,28 @@ async def get_escalation(escalation_id: str) -> dict[str, Any]:
 class UpdateEscalationRequest(BaseModel):
     status: str | None = None
     operator_response: str | None = None
+
+
+class CSATRatingRequest(BaseModel):
+    escalation_id: str
+    rating: int  # 1-5 stars
+    feedback: str | None = None
+
+
+class SummarizeRequest(BaseModel):
+    text: str
+    language: str = "ru"
+
+
+class TranslateRequest(BaseModel):
+    text: str
+    target_language: str  # "ru" or "kz"
+
+
+class GenerateSuggestionRequest(BaseModel):
+    client_message: str
+    context: str | None = None
+    language: str = "ru"
 
 
 @router.patch("/escalations/{escalation_id}")
@@ -256,4 +319,105 @@ async def delete_escalation(escalation_id: str) -> dict[str, Any]:
     if len(escalations_store) < initial_len:
         return {"success": True, "message": "Эскалация удалена"}
     return {"success": False, "error": "Эскалация не найдена"}
+
+
+# ============================================================================
+# AI Tools для операторов
+# ============================================================================
+
+@router.post("/summarize")
+async def summarize_text(request: SummarizeRequest) -> dict[str, Any]:
+    """
+    Резюмирование текста с помощью AI.
+    
+    Полезно для операторов чтобы быстро понять суть длинной переписки.
+    """
+    summary = await rag_service.summarize(request.text, request.language)
+    return {"summary": summary}
+
+
+@router.post("/translate")
+async def translate_text(request: TranslateRequest) -> dict[str, Any]:
+    """
+    Перевод текста между русским и казахским.
+    
+    Поддерживает:
+    - ru -> kz
+    - kz -> ru
+    """
+    translated = await rag_service.translate(request.text, request.target_language)
+    return {"translated": translated, "target_language": request.target_language}
+
+
+@router.post("/suggest-response")
+async def suggest_response(request: GenerateSuggestionRequest) -> dict[str, Any]:
+    """
+    Генерация подсказки ответа для оператора.
+    
+    AI анализирует сообщение клиента и предлагает готовый ответ.
+    """
+    suggestion = await rag_service.generate_response_suggestion(
+        request.client_message,
+        request.context,
+        request.language,
+    )
+    return {"suggestion": suggestion}
+
+
+# ============================================================================
+# CSAT (Customer Satisfaction Score)
+# ============================================================================
+
+@router.post("/csat")
+async def submit_csat(request: CSATRatingRequest) -> dict[str, Any]:
+    """
+    Отправка оценки удовлетворённости клиента (CSAT).
+    
+    Rating: 1-5 звёзд
+    """
+    # Найти эскалацию и добавить оценку
+    for escalation in escalations_store:
+        if escalation["escalation_id"] == request.escalation_id:
+            escalation["csat_rating"] = request.rating
+            escalation["csat_feedback"] = request.feedback
+            escalation["csat_submitted_at"] = datetime.now().isoformat()
+            return {
+                "success": True,
+                "message": "Спасибо за вашу оценку!",
+            }
+    
+    return {"success": False, "error": "Эскалация не найдена"}
+
+
+@router.get("/csat/stats")
+async def get_csat_stats() -> dict[str, Any]:
+    """
+    Статистика CSAT.
+    
+    Возвращает средний балл и распределение оценок.
+    """
+    ratings = [e.get("csat_rating") for e in escalations_store if e.get("csat_rating")]
+    
+    if not ratings:
+        return {
+            "average": 0,
+            "total_responses": 0,
+            "distribution": {1: 0, 2: 0, 3: 0, 4: 0, 5: 0},
+            "satisfaction_rate": 0,
+        }
+    
+    distribution = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+    for r in ratings:
+        distribution[r] = distribution.get(r, 0) + 1
+    
+    # Satisfaction rate = % оценок 4-5
+    satisfied = sum(1 for r in ratings if r >= 4)
+    satisfaction_rate = satisfied / len(ratings) if ratings else 0
+    
+    return {
+        "average": sum(ratings) / len(ratings),
+        "total_responses": len(ratings),
+        "distribution": distribution,
+        "satisfaction_rate": satisfaction_rate,
+    }
 

@@ -12,6 +12,9 @@ import {
   Search,
   RefreshCw,
   X,
+  Languages,
+  FileText,
+  Wand2,
 } from 'lucide-react'
 import { chatApi, type Escalation } from '../api/client'
 
@@ -105,6 +108,11 @@ export const OperatorPage = () => {
   const [isAddingArticle, setIsAddingArticle] = useState(false)
   const [addArticleSuccess, setAddArticleSuccess] = useState(false)
 
+  // AI Tools state
+  const [isGeneratingSuggestion, setIsGeneratingSuggestion] = useState(false)
+  const [isSummarizing, setIsSummarizing] = useState(false)
+  const [isTranslating, setIsTranslating] = useState(false)
+
   // Load escalations from API
   const loadEscalations = useCallback(async () => {
     setIsLoading(true)
@@ -191,6 +199,59 @@ export const OperatorPage = () => {
       setSelectedTicket({ ...selectedTicket, status: newStatus })
     } catch (error) {
       console.error('Error changing status:', error)
+    }
+  }
+
+  // AI: Generate response suggestion
+  const handleGenerateSuggestion = async () => {
+    if (!selectedTicket) return
+
+    setIsGeneratingSuggestion(true)
+    try {
+      const res = await chatApi.suggestResponse(
+        selectedTicket.client_message,
+        selectedTicket.summary,
+        'ru'
+      )
+      setResponse(res.data.suggestion)
+    } catch (error) {
+      console.error('Error generating suggestion:', error)
+    } finally {
+      setIsGeneratingSuggestion(false)
+    }
+  }
+
+  // AI: Summarize conversation
+  const handleSummarize = async () => {
+    if (!selectedTicket) return
+
+    setIsSummarizing(true)
+    try {
+      const textToSummarize = selectedTicket.conversation_history
+        ?.map((m) => `${m.is_user ? 'Клиент' : 'AI'}: ${m.content}`)
+        .join('\n') || selectedTicket.client_message
+
+      const res = await chatApi.summarize(textToSummarize, 'ru')
+      alert(`📝 Резюме:\n\n${res.data.summary}`)
+    } catch (error) {
+      console.error('Error summarizing:', error)
+    } finally {
+      setIsSummarizing(false)
+    }
+  }
+
+  // AI: Translate response
+  const handleTranslate = async (targetLang: 'ru' | 'kz') => {
+    if (!response.trim()) return
+
+    setIsTranslating(true)
+    try {
+      const res = await chatApi.translate(response, targetLang)
+      setResponse(res.data.translated)
+    } catch (error) {
+      console.error('Error translating:', error)
+    } finally {
+      setIsTranslating(false)
     }
   }
 
@@ -466,17 +527,80 @@ export const OperatorPage = () => {
                     </div>
                   </div>
 
-                  {/* AI Suggestion */}
+                  {/* AI Tools */}
                   <div className="mb-4 rounded-xl bg-purple-500/10 p-4">
-                    <div className="flex items-center gap-2 mb-2">
-                      <Sparkles className="h-4 w-4 text-purple-500" />
-                      <span className="text-sm font-medium text-purple-600 dark:text-purple-400">
-                        AI подсказка
-                      </span>
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-2">
+                        <Sparkles className="h-4 w-4 text-purple-500" />
+                        <span className="text-sm font-medium text-purple-600 dark:text-purple-400">
+                          AI Инструменты
+                        </span>
+                      </div>
                     </div>
-                    <p className="text-sm text-purple-700 dark:text-purple-300">
-                      Рекомендую уточнить у клиента детали проблемы и предложить пошаговое решение.
-                      После успешного решения можно добавить ответ в базу знаний AI.
+                    
+                    <div className="grid grid-cols-3 gap-2">
+                      <button
+                        onClick={handleGenerateSuggestion}
+                        disabled={isGeneratingSuggestion}
+                        className="flex items-center justify-center gap-2 rounded-lg bg-purple-500 px-3 py-2 text-xs font-medium text-white transition hover:bg-purple-600 disabled:opacity-50"
+                      >
+                        {isGeneratingSuggestion ? (
+                          <RefreshCw className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <Wand2 className="h-3 w-3" />
+                        )}
+                        Подсказка
+                      </button>
+                      
+                      <button
+                        onClick={handleSummarize}
+                        disabled={isSummarizing}
+                        className="flex items-center justify-center gap-2 rounded-lg bg-blue-500 px-3 py-2 text-xs font-medium text-white transition hover:bg-blue-600 disabled:opacity-50"
+                      >
+                        {isSummarizing ? (
+                          <RefreshCw className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <FileText className="h-3 w-3" />
+                        )}
+                        Резюме
+                      </button>
+                      
+                      <div className="flex gap-1">
+                        <button
+                          onClick={() => handleTranslate('kz')}
+                          disabled={isTranslating || !response.trim()}
+                          className="flex-1 flex items-center justify-center gap-1 rounded-lg bg-emerald-500 px-2 py-2 text-xs font-medium text-white transition hover:bg-emerald-600 disabled:opacity-50"
+                          title="Перевести на казахский"
+                        >
+                          {isTranslating ? (
+                            <RefreshCw className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <>
+                              <Languages className="h-3 w-3" />
+                              KZ
+                            </>
+                          )}
+                        </button>
+                        <button
+                          onClick={() => handleTranslate('ru')}
+                          disabled={isTranslating || !response.trim()}
+                          className="flex-1 flex items-center justify-center gap-1 rounded-lg bg-emerald-500 px-2 py-2 text-xs font-medium text-white transition hover:bg-emerald-600 disabled:opacity-50"
+                          title="Перевести на русский"
+                        >
+                          {isTranslating ? (
+                            <RefreshCw className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <>
+                              <Languages className="h-3 w-3" />
+                              RU
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                    
+                    <p className="mt-3 text-xs text-purple-600/70 dark:text-purple-400/70">
+                      💡 Нажмите "Подсказка" чтобы AI сгенерировал ответ на основе базы знаний
                     </p>
                   </div>
 
