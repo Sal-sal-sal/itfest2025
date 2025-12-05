@@ -7,9 +7,12 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request, Form
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from twilio.twiml.voice_response import VoiceResponse, Gather, Dial
+from twilio.twiml.voice_response import VoiceResponse, Gather, Dial, Say
 
 from ....db.session import get_session
+
+# Скорость речи (1.0 = нормальная, 2.0 = в 2 раза быстрее)
+SPEECH_RATE = "fast"  # slow, medium, fast, x-fast или проценты "200%"
 from ....services.ticket_service import TicketService
 from ....services.AI import rag_service
 from ....schemas.ticket import TicketCreate, TicketSource, TicketPriority
@@ -59,13 +62,12 @@ async def handle_incoming_call(
     # Создаём TwiML ответ
     response = VoiceResponse()
     
-    # Приветствие
-    response.say(
+    # Приветствие (ускоренное 2x)
+    _say_fast(
+        response,
         "Здравствуйте! Вы позвонили в службу поддержки. "
         "Я виртуальный ассистент и постараюсь вам помочь. "
         "Пожалуйста, опишите вашу проблему после сигнала.",
-        voice="alice",  # Русский женский голос
-        language="ru-RU",
     )
     
     # Собираем голосовой ввод
@@ -79,11 +81,7 @@ async def handle_incoming_call(
     response.append(gather)
     
     # Если пользователь ничего не сказал
-    response.say(
-        "Извините, я вас не услышала. Попробуйте ещё раз.",
-        voice="alice",
-        language="ru-RU",
-    )
+    _say_fast(response, "Извините, я вас не услышала. Попробуйте ещё раз.")
     response.redirect("/api/v1/integrations/twilio-voice/incoming")
     
     return Response(content=str(response), media_type="application/xml")
@@ -118,11 +116,7 @@ async def process_speech(
     
     if not user_text:
         response = VoiceResponse()
-        response.say(
-            "Извините, я не расслышала. Повторите, пожалуйста.",
-            voice="alice",
-            language="ru-RU",
-        )
+        _say_fast(response, "Извините, я не расслышала. Повторите, пожалуйста.")
         gather = Gather(
             input="speech",
             language="ru-RU",
@@ -186,17 +180,11 @@ async def process_speech(
             response, CallSid, call_session, session, user_text, tool_call.get("result", {})
         )
     
-    # Озвучиваем ответ AI
-    # Очищаем от эмодзи и markdown для голоса
-    clean_response = _clean_for_speech(response_text)
-    response.say(clean_response, voice="alice", language="ru-RU")
+    # Озвучиваем ответ AI (ускоренный 2x)
+    _say_fast(response, response_text)
     
     # Спрашиваем есть ли ещё вопросы
-    response.say(
-        "Могу ли я ещё чем-то помочь?",
-        voice="alice",
-        language="ru-RU",
-    )
+    _say_fast(response, "Могу ли я ещё чем-то помочь?")
     
     # Собираем следующий голосовой ввод
     gather = Gather(
@@ -209,11 +197,7 @@ async def process_speech(
     response.append(gather)
     
     # Если молчание - завершаем
-    response.say(
-        "Спасибо за звонок. До свидания!",
-        voice="alice",
-        language="ru-RU",
-    )
+    _say_fast(response, "Спасибо за звонок. До свидания!")
     response.hangup()
     
     return Response(content=str(response), media_type="application/xml")
@@ -232,11 +216,10 @@ async def _transfer_to_operator(
     operator_phone = get_operator_phone()
     
     if not operator_phone:
-        response.say(
+        _say_fast(
+            response,
             "К сожалению, сейчас все операторы заняты. "
             "Пожалуйста, перезвоните позже или оставьте сообщение на нашем сайте.",
-            voice="alice",
-            language="ru-RU",
         )
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
@@ -291,11 +274,7 @@ async def _transfer_to_operator(
     voice_sessions[call_sid] = call_session
     
     # Говорим клиенту что переводим
-    response.say(
-        "Сейчас переведу вас на оператора. Пожалуйста, оставайтесь на линии.",
-        voice="alice",
-        language="ru-RU",
-    )
+    _say_fast(response, "Сейчас переведу вас на оператора. Пожалуйста, оставайтесь на линии.")
     
     # Переводим звонок на оператора
     dial = Dial(
@@ -307,11 +286,7 @@ async def _transfer_to_operator(
     response.append(dial)
     
     # Если оператор не ответил
-    response.say(
-        "К сожалению, оператор не ответил. Мы свяжемся с вами в ближайшее время.",
-        voice="alice",
-        language="ru-RU",
-    )
+    _say_fast(response, "К сожалению, оператор не ответил. Мы свяжемся с вами в ближайшее время.")
     response.hangup()
     
     return Response(content=str(response), media_type="application/xml")
@@ -330,18 +305,10 @@ async def dial_status(
     
     if DialCallStatus == "completed":
         # Звонок успешно завершён
-        response.say(
-            "Спасибо за звонок. До свидания!",
-            voice="alice",
-            language="ru-RU",
-        )
+        _say_fast(response, "Спасибо за звонок. До свидания!")
     elif DialCallStatus in ["busy", "no-answer", "failed"]:
         # Оператор не ответил
-        response.say(
-            "Оператор сейчас недоступен. Мы перезвоним вам в ближайшее время.",
-            voice="alice",
-            language="ru-RU",
-        )
+        _say_fast(response, "Оператор сейчас недоступен. Мы перезвоним вам в ближайшее время.")
     
     response.hangup()
     return Response(content=str(response), media_type="application/xml")
@@ -407,4 +374,21 @@ def _clean_for_speech(text: str) -> str:
     text = re.sub(r'\s+', ' ', text).strip()
     
     return text
+
+
+def _say_fast(response: VoiceResponse, text: str, language: str = "ru-RU") -> None:
+    """Озвучить текст с ускорением 2x через SSML."""
+    clean_text = _clean_for_speech(text)
+    
+    # Используем SSML с prosody rate для ускорения
+    # rate: x-slow, slow, medium, fast, x-fast или проценты (200% = 2x)
+    ssml_text = f'<speak><prosody rate="200%">{clean_text}</prosody></speak>'
+    
+    # Polly voice Tatyana поддерживает SSML для русского
+    response.say(
+        ssml_text,
+        voice="Polly.Tatyana",  # Amazon Polly русский голос с поддержкой SSML
+        language=language,
+    )
+
 

@@ -1107,6 +1107,92 @@ class RAGService:
                 return search_results[0]["answer"]
             return "Рекомендую уточнить детали проблемы у клиента."
 
+    async def analyze_conversation_for_kb(
+        self,
+        conversation: str,
+        summary: str = "",
+        language: str = "ru",
+    ) -> dict[str, Any]:
+        """
+        Анализирует переписку и извлекает проблему, решение и предложение для базы знаний.
+        """
+        if not self.use_openai:
+            return {
+                "problem": summary or "Проблема клиента",
+                "solution": "Решение требует анализа оператором",
+                "suggested_question": summary or "Вопрос для базы знаний",
+                "suggested_answer": "Ответ требует формулировки оператором",
+                "suggested_category": "it_support",
+                "suggested_subcategory": "software",
+                "can_auto_resolve": False,
+            }
+        
+        system_prompt = """Ты - аналитик службы поддержки. Проанализируй переписку между клиентом и оператором.
+
+Извлеки:
+1. ПРОБЛЕМУ клиента (кратко, 1-2 предложения)
+2. РЕШЕНИЕ, которое предоставил оператор (подробно, пошагово если применимо)
+3. Сформулируй ВОПРОС для базы знаний (как бы клиент мог спросить)
+4. Сформулируй ОТВЕТ для базы знаний (полный, понятный, с инструкцией)
+5. Предложи КАТЕГОРИЮ (it_support, hr, finance, facilities)
+6. Предложи ПОДКАТЕГОРИЮ:
+   - it_support: passwords, vpn, hardware, software
+   - hr: vacation, documents, benefits
+   - finance: salary, expenses, invoices
+   - facilities: office, supplies, parking
+7. Определи, можно ли автоматически решать такие вопросы (true/false)
+
+Ответ СТРОГО в JSON формате:
+{
+    "problem": "...",
+    "solution": "...",
+    "suggested_question": "...",
+    "suggested_answer": "...",
+    "suggested_category": "...",
+    "suggested_subcategory": "...",
+    "can_auto_resolve": true/false
+}"""
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": f"Переписка:\n\n{conversation}\n\nКраткое описание обращения: {summary}"},
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": 1000,
+                        "response_format": {"type": "json_object"},
+                    },
+                    timeout=60.0,
+                )
+                response.raise_for_status()
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                
+                import json
+                result = json.loads(content)
+                return result
+        except Exception as e:
+            print(f"Analyze conversation error: {e}")
+            return {
+                "problem": summary or "Проблема клиента",
+                "solution": "Не удалось извлечь решение автоматически",
+                "suggested_question": summary or "Вопрос для базы знаний",
+                "suggested_answer": "Требуется ручная формулировка ответа",
+                "suggested_category": "it_support",
+                "suggested_subcategory": "software",
+                "can_auto_resolve": False,
+                "error": str(e),
+            }
+
 
 # Singleton instance
 rag_service = RAGService()

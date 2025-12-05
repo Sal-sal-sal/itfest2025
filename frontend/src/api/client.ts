@@ -323,7 +323,7 @@ export interface Escalation {
   operator_response?: string
   resolved_at?: string
   responded_at?: string
-  conversation_history?: Array<{ content: string; is_user: boolean }>
+  conversation_history?: Array<{ content: string; is_user: boolean; is_operator?: boolean }>
   // New: list of all messages
   client_messages?: Array<{ content: string; timestamp: string }>
   operator_messages?: Array<{ content: string; timestamp: string }>
@@ -405,6 +405,25 @@ export const chatApi = {
     api.post<{ suggestion: string }>('/chat/suggest-response', {
       client_message: clientMessage,
       context,
+      language,
+    }),
+
+  // AI analysis of conversation for knowledge base
+  analyzeConversation: (escalationId: string, language = 'ru') =>
+    api.post<{
+      success: boolean
+      analysis?: {
+        problem: string
+        solution: string
+        suggested_question: string
+        suggested_answer: string
+        suggested_category: string
+        suggested_subcategory: string
+        can_auto_resolve: boolean
+      }
+      error?: string
+    }>('/chat/analyze-conversation', {
+      escalation_id: escalationId,
       language,
     }),
 

@@ -205,7 +205,7 @@ async def chat(
             "department_name": tool_result.get("department_name", "IT Поддержка"),
             "priority": priority_str,
             "status": "pending",
-            "created_at": datetime.now().isoformat(),
+            "created_at": datetime.utcnow().isoformat() + "Z",
             "conversation_history": [
                 {"content": m.content, "is_user": m.is_user}
                 for m in (request.conversation_history or [])
@@ -276,7 +276,7 @@ async def chat(
             "department_name": dept_name_mapping.get(dept, "IT Поддержка"),
             "priority": priority_str,
             "status": "pending",
-            "created_at": datetime.now().isoformat(),
+            "created_at": datetime.utcnow().isoformat() + "Z",
             "conversation_history": [
                 {"content": m.content, "is_user": m.is_user}
                 for m in (request.conversation_history or [])
@@ -335,7 +335,7 @@ async def chat(
                 "department_name": "AI Поддержка",
                 "priority": "low",
                 "status": "resolved",  # Уже решено!
-                "created_at": datetime.now().isoformat(),
+                "created_at": datetime.utcnow().isoformat() + "Z",
                 "resolved_at": datetime.now().isoformat(),
                 "conversation_history": [
                     {"content": m.content, "is_user": m.is_user}
@@ -510,6 +510,11 @@ class TranslateRequest(BaseModel):
 class GenerateSuggestionRequest(BaseModel):
     client_message: str
     context: str | None = None
+    language: str = "ru"
+
+
+class AnalyzeConversationRequest(BaseModel):
+    escalation_id: str
     language: str = "ru"
 
 
@@ -696,6 +701,57 @@ async def suggest_response(request: GenerateSuggestionRequest) -> dict[str, Any]
         request.language,
     )
     return {"suggestion": suggestion}
+
+
+@router.post("/analyze-conversation")
+async def analyze_conversation(request: AnalyzeConversationRequest) -> dict[str, Any]:
+    """
+    AI анализирует переписку клиента с оператором и извлекает:
+    - Проблему клиента
+    - Решение, которое предоставил оператор
+    - Предложение для добавления в базу знаний
+    """
+    # Найти эскалацию
+    escalation = None
+    for e in escalations_store:
+        if e["escalation_id"] == request.escalation_id or e["id"] == request.escalation_id:
+            escalation = e
+            break
+    
+    if not escalation:
+        return {"success": False, "error": "Эскалация не найдена"}
+    
+    # Собрать всю переписку
+    conversation_text = ""
+    
+    # Добавляем историю разговора
+    for msg in escalation.get("conversation_history", []):
+        role = "Клиент" if msg.get("is_user") else ("Оператор" if msg.get("is_operator") else "AI")
+        conversation_text += f"{role}: {msg['content']}\n\n"
+    
+    # Добавляем сообщения клиента
+    for msg in escalation.get("client_messages", []):
+        conversation_text += f"Клиент: {msg['content']}\n\n"
+    
+    # Добавляем ответы оператора
+    for msg in escalation.get("operator_messages", []):
+        conversation_text += f"Оператор: {msg['content']}\n\n"
+    
+    if not conversation_text.strip():
+        return {"success": False, "error": "Нет переписки для анализа"}
+    
+    # Анализируем с помощью AI
+    analysis = await rag_service.analyze_conversation_for_kb(
+        conversation_text,
+        escalation.get("summary", ""),
+        request.language,
+    )
+    
+    return {
+        "success": True,
+        "analysis": analysis,
+        "escalation_id": request.escalation_id,
+    }
 
 
 # ============================================================================

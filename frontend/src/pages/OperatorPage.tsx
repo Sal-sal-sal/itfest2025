@@ -31,11 +31,30 @@ const SLA_TIMES: Record<string, number> = {
 
 // Функция расчёта оставшегося времени SLA
 const getSLAStatus = (createdAt: string, priority: string) => {
-  const created = new Date(createdAt).getTime()
+  // Parse the date - handle both ISO and local formats
+  let created: number
+  try {
+    // Try parsing as ISO string first
+    const parsedDate = new Date(createdAt)
+    // Check if date is valid and not in the future by more than a minute (clock skew)
+    if (isNaN(parsedDate.getTime()) || parsedDate.getTime() > Date.now() + 60000) {
+      // Invalid or future date - use current time as fallback
+      created = Date.now()
+    } else {
+      created = parsedDate.getTime()
+    }
+  } catch {
+    created = Date.now()
+  }
+  
   const now = Date.now()
   const elapsed = (now - created) / 60000 // в минутах
+  
+  // Защита от отрицательных значений (если время создания в будущем)
+  const actualElapsed = Math.max(0, elapsed)
+  
   const slaTime = SLA_TIMES[priority] || 240
-  const remaining = slaTime - elapsed
+  const remaining = slaTime - actualElapsed
   
   const formatTime = (mins: number) => {
     if (mins < 0) return 'Просрочено'
@@ -45,8 +64,20 @@ const getSLAStatus = (createdAt: string, priority: string) => {
     return `${hours}ч ${minutes}м`
   }
   
+  const formatElapsed = (mins: number) => {
+    if (mins < 1) return 'только что'
+    if (mins < 60) return `${Math.round(mins)} мин назад`
+    const hours = Math.floor(mins / 60)
+    const minutes = Math.round(mins % 60)
+    if (hours < 24) return `${hours}ч ${minutes}м назад`
+    const days = Math.floor(hours / 24)
+    return `${days}д назад`
+  }
+  
   return {
     remaining,
+    elapsed: actualElapsed,
+    elapsedFormatted: formatElapsed(actualElapsed),
     formatted: formatTime(remaining),
     percentage: Math.max(0, Math.min(100, (remaining / slaTime) * 100)),
     isOverdue: remaining < 0,
@@ -169,6 +200,7 @@ export const OperatorPage = () => {
   const [isLoading, setIsLoading] = useState(true)
   const [filterStatus, setFilterStatus] = useState<string>('all')
   const [searchQuery, setSearchQuery] = useState('')
+  const [operatorImageError, setOperatorImageError] = useState(false)
 
   // Knowledge Base state
   const [newArticle, setNewArticle] = useState<KBArticle>({
@@ -188,6 +220,16 @@ export const OperatorPage = () => {
   const [isGeneratingSuggestion, setIsGeneratingSuggestion] = useState(false)
   const [isSummarizing, setIsSummarizing] = useState(false)
   const [isTranslating, setIsTranslating] = useState(false)
+  const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [analysisResult, setAnalysisResult] = useState<{
+    problem: string
+    solution: string
+    suggested_question: string
+    suggested_answer: string
+    suggested_category: string
+    suggested_subcategory: string
+    can_auto_resolve: boolean
+  } | null>(null)
   
   // Sound notification state
   const [soundEnabled, setSoundEnabled] = useState(true)
@@ -408,6 +450,40 @@ export const OperatorPage = () => {
     }
   }
 
+  // AI: Analyze conversation and extract solution for KB
+  const handleAnalyzeConversation = async () => {
+    if (!selectedTicket) return
+
+    setIsAnalyzing(true)
+    setAnalysisResult(null)
+    try {
+      const res = await chatApi.analyzeConversation(selectedTicket.escalation_id, 'ru')
+      if (res.data.success && res.data.analysis) {
+        setAnalysisResult(res.data.analysis)
+        // Auto-fill the KB article form with the analysis
+        setNewArticle({
+          category_key: res.data.analysis.suggested_category,
+          subcategory_key: res.data.analysis.suggested_subcategory,
+          question: res.data.analysis.suggested_question,
+          answer: res.data.analysis.suggested_answer,
+          question_kz: '',
+          answer_kz: '',
+          can_auto_resolve: res.data.analysis.can_auto_resolve,
+          priority: selectedTicket.priority || 'medium',
+        })
+        // Switch to knowledge tab to show the form
+        setActiveTab('knowledge')
+      } else {
+        alert('Не удалось проанализировать переписку: ' + (res.data.error || 'Неизвестная ошибка'))
+      }
+    } catch (error) {
+      console.error('Error analyzing conversation:', error)
+      alert('Ошибка при анализе переписки')
+    } finally {
+      setIsAnalyzing(false)
+    }
+  }
+
   // Handle add article to KB
   const handleAddArticle = async () => {
     if (!newArticle.category_key || !newArticle.subcategory_key || !newArticle.question || !newArticle.answer) {
@@ -483,11 +559,18 @@ export const OperatorPage = () => {
 
               {/* Operator Profile */}
               <div className="flex items-center gap-3 rounded-xl bg-surface border border-border/30 px-4 py-2">
-                <img
-                  src="/images/operator-avatar.webp"
-                  alt="Оператор"
-                  className="h-10 w-10 rounded-full object-cover ring-2 ring-brand-500/30"
-                />
+                <div className="relative h-10 w-10 rounded-full bg-gradient-to-br from-brand-500 to-purple-500 flex items-center justify-center ring-2 ring-brand-500/30 overflow-hidden">
+                  {!operatorImageError ? (
+                    <img
+                      src="/images/operator-avatar.webp"
+                      alt="Оператор"
+                      className="h-full w-full object-cover"
+                      onError={() => setOperatorImageError(true)}
+                    />
+                  ) : (
+                    <div className="text-white font-semibold text-sm">АИ</div>
+                  )}
+                </div>
                 <div className="hidden sm:block">
                   <p className="text-sm font-semibold text-foreground">Алексей Иванов</p>
                   <p className="text-xs text-muted">Старший оператор</p>
@@ -616,7 +699,7 @@ export const OperatorPage = () => {
                             <div className="flex items-center justify-between text-xs mb-1">
                               <span className="flex items-center gap-1 text-muted">
                                 <Clock className="h-3 w-3" />
-                                {Math.round((Date.now() - new Date(ticket.created_at).getTime()) / 60000)} мин назад
+                                {sla.elapsedFormatted}
                               </span>
                               <span className={`flex items-center gap-1 font-medium ${
                                 sla.isOverdue ? 'text-red-500' : sla.isWarning ? 'text-amber-500' : 'text-emerald-500'
@@ -702,52 +785,60 @@ export const OperatorPage = () => {
                     <div className="mt-4 space-y-2">
                       <p className="text-xs font-medium text-muted">💬 Чат с клиентом:</p>
                       <div className="max-h-60 overflow-y-auto space-y-2 rounded-lg bg-surface p-3">
-                        {/* Combine all messages and sort by timestamp */}
+                        {/* Display messages in correct order */}
                         {(() => {
-                          // Build unified message list
-                          const allMessages: Array<{
-                            type: 'history' | 'client' | 'operator'
+                          const normalizeContent = (text: string) => text.trim().toLowerCase()
+
+                          // Collect contents to avoid duplicates
+                          const clientMessageContents = new Set(
+                            selectedTicket.client_messages?.map((msg) => normalizeContent(msg.content)) || []
+                          )
+                          const operatorMessageContents = new Set(
+                            selectedTicket.operator_messages?.map((msg) => normalizeContent(msg.content)) || []
+                          )
+
+                          // 1. First show conversation_history (AI dialog) in original order
+                          const historyMessages = (selectedTicket.conversation_history || [])
+                            .filter((msg) => {
+                              const normalized = normalizeContent(msg.content)
+                              // Skip if duplicated in client/operator messages
+                              if (msg.is_user && clientMessageContents.has(normalized)) return false
+                              if (msg.is_operator && operatorMessageContents.has(normalized)) return false
+                              return true
+                            })
+
+                          // 2. Then show client_messages and operator_messages sorted by timestamp
+                          const liveMessages: Array<{
+                            type: 'client' | 'operator'
                             content: string
                             timestamp: Date
-                            is_user?: boolean
                           }> = []
 
-                          // Add conversation history (no timestamps, keep original order)
-                          selectedTicket.conversation_history?.forEach((msg, idx) => {
-                            allMessages.push({
-                              type: 'history',
-                              content: msg.content,
-                              timestamp: new Date(new Date(selectedTicket.created_at).getTime() + idx * 1000),
-                              is_user: msg.is_user,
-                            })
-                          })
-
-                          // Add client messages with timestamps
                           selectedTicket.client_messages?.forEach((msg) => {
-                            allMessages.push({
+                            liveMessages.push({
                               type: 'client',
                               content: msg.content,
                               timestamp: new Date(msg.timestamp),
                             })
                           })
 
-                          // Add operator messages with timestamps
                           selectedTicket.operator_messages?.forEach((msg) => {
-                            allMessages.push({
+                            liveMessages.push({
                               type: 'operator',
                               content: msg.content,
                               timestamp: new Date(msg.timestamp),
                             })
                           })
 
-                          // Sort by timestamp
-                          allMessages.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
+                          // Sort live messages by timestamp
+                          liveMessages.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
 
-                          return allMessages.map((msg, idx) => {
-                            if (msg.type === 'history') {
-                              return (
+                          return (
+                            <>
+                              {/* History messages first (AI dialog before escalation) */}
+                              {historyMessages.map((msg, idx) => (
                                 <div
-                                  key={`msg-${idx}`}
+                                  key={`history-${idx}`}
                                   className={`rounded-lg p-2 text-sm ${
                                     msg.is_user
                                       ? 'bg-brand-500/10 text-foreground ml-4'
@@ -759,33 +850,34 @@ export const OperatorPage = () => {
                                   </span>
                                   <p className="mt-1">{msg.content}</p>
                                 </div>
-                              )
-                            } else if (msg.type === 'client') {
-                              return (
-                                <div
-                                  key={`msg-${idx}`}
-                                  className="rounded-lg p-2 text-sm bg-blue-500/10 text-foreground ml-4 border-l-2 border-blue-500"
-                                >
-                                  <span className="text-xs text-blue-600 dark:text-blue-400">
-                                    👤 Клиент • {msg.timestamp.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
-                                  </span>
-                                  <p className="mt-1">{msg.content}</p>
-                                </div>
-                              )
-                            } else {
-                              return (
-                                <div
-                                  key={`msg-${idx}`}
-                                  className="rounded-lg p-2 text-sm bg-emerald-500/10 text-foreground mr-4 border-l-2 border-emerald-500"
-                                >
-                                  <span className="text-xs text-emerald-600 dark:text-emerald-400">
-                                    👨‍💼 Вы • {msg.timestamp.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
-                                  </span>
-                                  <p className="mt-1">{msg.content}</p>
-                                </div>
-                              )
-                            }
-                          })
+                              ))}
+                              
+                              {/* Live messages (after escalation) sorted by time */}
+                              {liveMessages.map((msg, idx) => (
+                                msg.type === 'client' ? (
+                                  <div
+                                    key={`live-${idx}`}
+                                    className="rounded-lg p-2 text-sm bg-blue-500/10 text-foreground ml-4 border-l-2 border-blue-500"
+                                  >
+                                    <span className="text-xs text-blue-600 dark:text-blue-400">
+                                      👤 Клиент • {msg.timestamp.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
+                                    </span>
+                                    <p className="mt-1">{msg.content}</p>
+                                  </div>
+                                ) : (
+                                  <div
+                                    key={`live-${idx}`}
+                                    className="rounded-lg p-2 text-sm bg-emerald-500/10 text-foreground mr-4 border-l-2 border-emerald-500"
+                                  >
+                                    <span className="text-xs text-emerald-600 dark:text-emerald-400">
+                                      👨‍💼 Вы • {msg.timestamp.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
+                                    </span>
+                                    <p className="mt-1">{msg.content}</p>
+                                  </div>
+                                )
+                              ))}
+                            </>
+                          )
                         })()}
                       </div>
                     </div>
@@ -869,6 +961,25 @@ export const OperatorPage = () => {
                         </button>
                       </div>
                     </div>
+                    
+                    {/* AI Analyze & Add to KB Button */}
+                    <button
+                      onClick={handleAnalyzeConversation}
+                      disabled={isAnalyzing}
+                      className="mt-3 w-full flex items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2.5 text-sm font-medium text-white transition hover:from-amber-600 hover:to-orange-600 disabled:opacity-50"
+                    >
+                      {isAnalyzing ? (
+                        <>
+                          <RefreshCw className="h-4 w-4 animate-spin" />
+                          Анализирую переписку...
+                        </>
+                      ) : (
+                        <>
+                          <Brain className="h-4 w-4" />
+                          🧠 AI: Извлечь решение в Базу знаний
+                        </>
+                      )}
+                    </button>
                     
                     <p className="mt-3 text-xs text-purple-600/70 dark:text-purple-400/70">
                       💡 Нажмите "Подсказка" чтобы AI сгенерировал ответ на основе базы знаний
