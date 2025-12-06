@@ -305,9 +305,10 @@ async def chat(
             tool_result["ticket_id"] = str(db_ticket.id)
             result["tool_call"]["result"] = tool_result
             
-            # Добавляем в escalations_store для отслеживания
+            # Добавляем в escalation_store для отслеживания (с поддержкой Redis)
+            import uuid as uuid_module
             escalation = {
-                "id": str(len(escalations_store) + 1),
+                "id": str(uuid_module.uuid4()),
                 "escalation_id": db_ticket.ticket_number,
                 "client_message": request.message,
                 "summary": subject,
@@ -317,7 +318,7 @@ async def chat(
                 "priority": "low",
                 "status": "resolved",  # Уже решено!
                 "created_at": datetime.utcnow().isoformat() + "Z",
-                "resolved_at": datetime.now().isoformat(),
+                "resolved_at": datetime.utcnow().isoformat() + "Z",
                 "conversation_history": [
                     {"content": m.content, "is_user": m.is_user}
                     for m in (request.conversation_history or [])
@@ -327,7 +328,7 @@ async def chat(
                 "ticket_id": str(db_ticket.id),
                 "ai_auto_resolved": True,
             }
-            escalations_store.append(escalation)
+            await escalation_store.add(escalation)
             
         except Exception as e:
             print(f"Error creating AI-resolved ticket in DB: {e}")

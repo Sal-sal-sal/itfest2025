@@ -1,3 +1,4 @@
 ---
 alwaysApply: true
 ---
+& "$env:USERPROFILE\ngrok\ngrok.exe" http 8000 --domain=geostatic-reemergent-reynaldo.ngrok-free.dev

@@ -207,3 +207,4 @@ class EscalationStore:
 # Singleton instance
 escalation_store = EscalationStore()
 
+

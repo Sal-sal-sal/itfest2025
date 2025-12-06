@@ -1,6 +1,7 @@
 """API роуты для WhatsApp интеграции через Twilio."""
 
 import logging
+import uuid as uuid_module
 from datetime import datetime
 from typing import Any
 
@@ -13,8 +14,8 @@ from ....services.integrations.twilio_whatsapp import twilio_whatsapp_service
 from ....services.ticket_service import TicketService
 from ....services.AI import rag_service
 from ....schemas.ticket import TicketCreate, TicketSource, TicketPriority
-# Импортируем общее хранилище эскалаций
-from ..chat import escalations_store
+# Используем новое хранилище эскалаций с поддержкой Redis
+from ....services.escalation_store import escalation_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/twilio-whatsapp", tags=["twilio-whatsapp"])
@@ -79,33 +80,23 @@ async def twilio_webhook(
         
         if active_escalation_id:
             # Ищем эскалацию и добавляем сообщение клиента
-            for escalation in escalations_store:
-                if escalation.get("escalation_id") == active_escalation_id:
-                    if escalation.get("status") not in ["resolved", "closed"]:
-                        # Добавляем сообщение клиента в эскалацию
-                        if "client_messages" not in escalation:
-                            escalation["client_messages"] = []
-                        escalation["client_messages"].append({
-                            "content": text,
-                            "timestamp": datetime.now().isoformat(),
-                        })
-                        escalation["conversation_history"].append({
-                            "content": text,
-                            "is_user": True,
-                        })
-                        
-                        logger.info(f"Message added to escalation {active_escalation_id}")
-                        
-                        # Уведомляем клиента что сообщение доставлено оператору
-                        await twilio_whatsapp_service.send_message(
-                            phone_number,
-                            "📨 Ваше сообщение отправлено оператору. Ожидайте ответа."
-                        )
-                        return Response(content="", media_type="text/xml")
-                    else:
-                        # Эскалация закрыта — убираем маппинг
-                        del phone_to_escalation[phone_number]
-                        break
+            escalation = await escalation_store.get_by_id(active_escalation_id)
+            if escalation:
+                if escalation.get("status") not in ["resolved", "closed"]:
+                    # Добавляем сообщение клиента в эскалацию
+                    await escalation_store.add_client_message(active_escalation_id, text)
+                    
+                    logger.info(f"Message added to escalation {active_escalation_id}")
+                    
+                    # Уведомляем клиента что сообщение доставлено оператору
+                    await twilio_whatsapp_service.send_message(
+                        phone_number,
+                        "📨 Ваше сообщение отправлено оператору. Ожидайте ответа."
+                    )
+                    return Response(content="", media_type="text/xml")
+                else:
+                    # Эскалация закрыта — убираем маппинг
+                    del phone_to_escalation[phone_number]
         
         # ============================================================
         # Нет активной эскалации — обрабатываем через AI
@@ -179,10 +170,10 @@ async def twilio_webhook(
                 logger.info(f"Ticket created: {ticket_number}")
                 
                 # ============================================================
-                # Создаём эскалацию в общем хранилище (как на сайте)
+                # Создаём эскалацию в общем хранилище (с поддержкой Redis)
                 # ============================================================
                 escalation = {
-                    "id": str(len(escalations_store) + 1),
+                    "id": str(uuid_module.uuid4()),
                     "escalation_id": ticket_number,
                     "client_message": text,
                     "summary": subject,
@@ -191,7 +182,7 @@ async def twilio_webhook(
                     "department_name": dept_name_mapping.get(dept, "IT Поддержка"),
                     "priority": priority_str,
                     "status": "pending",
-                    "created_at": datetime.now().isoformat(),
+                    "created_at": datetime.utcnow().isoformat() + "Z",
                     "conversation_history": [
                         {"content": h["content"], "is_user": h["is_user"]}
                         for h in twilio_sessions[phone_number]["history"]
@@ -204,7 +195,7 @@ async def twilio_webhook(
                     "phone_number": phone_number,
                     "client_name": ProfileName,
                 }
-                escalations_store.append(escalation)
+                await escalation_store.add(escalation)
                 
                 # Связываем номер телефона с эскалацией
                 phone_to_escalation[phone_number] = ticket_number

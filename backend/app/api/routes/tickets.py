@@ -112,11 +112,55 @@ async def update_ticket(
     payload: TicketUpdate,
     session: AsyncSession = Depends(get_session),
 ) -> TicketRead:
-    """Обновляет тикет."""
+    """
+    Обновляет тикет.
+    
+    Также синхронизирует статус с эскалацией и уведомляет WhatsApp если resolved.
+    """
     service = TicketService(session)
     ticket = await service.update_ticket(ticket_id, payload)
     if not ticket:
         raise HTTPException(status_code=404, detail="Тикет не найден")
+    
+    # Синхронизируем статус с эскалацией и WhatsApp
+    if payload.status:
+        from ...services.escalation_store import escalation_store
+        from ...services.integrations.twilio_whatsapp import twilio_whatsapp_service
+        
+        try:
+            all_escalations = await escalation_store.get_all()
+            for escalation in all_escalations:
+                if escalation.get("ticket_id") == str(ticket_id):
+                    # Обновляем статус эскалации
+                    status_map = {
+                        "resolved": "resolved",
+                        "closed": "resolved",
+                        "processing": "in_progress",
+                        "new": "pending",
+                    }
+                    new_status = status_map.get(payload.status, escalation.get("status"))
+                    await escalation_store.set_status(
+                        escalation.get("escalation_id") or escalation.get("id"),
+                        new_status
+                    )
+                    
+                    # Если resolved и WhatsApp - уведомляем
+                    if payload.status in ("resolved", "closed") and escalation.get("source") == "whatsapp":
+                        phone_number = escalation.get("phone_number")
+                        if phone_number:
+                            await twilio_whatsapp_service.send_message(
+                                phone_number,
+                                "✅ Ваше обращение решено. Спасибо за обращение!\n\nЕсли у вас есть новые вопросы, просто напишите нам."
+                            )
+                            # Очищаем маппинг
+                            from .integrations.twilio_whatsapp import phone_to_escalation
+                            if phone_number in phone_to_escalation:
+                                del phone_to_escalation[phone_number]
+                            print(f"📱 Resolution notification sent to WhatsApp: {phone_number}")
+                    break
+        except Exception as e:
+            print(f"Error syncing status to escalation/WhatsApp: {e}")
+    
     return TicketRead.model_validate(ticket)
 
 
@@ -133,6 +177,8 @@ async def add_message(
     
     - is_from_client: сообщение от клиента
     - use_ai: сгенерировать ответ с помощью AI
+    
+    Также отправляет сообщение в WhatsApp если тикет связан с эскалацией из WhatsApp.
     """
     service = TicketService(session)
     message = await service.add_message(
@@ -143,6 +189,34 @@ async def add_message(
     )
     if not message:
         raise HTTPException(status_code=404, detail="Тикет не найден")
+    
+    # Если это ответ оператора (не от клиента) - проверяем связь с WhatsApp эскалацией
+    if not is_from_client:
+        from ...services.escalation_store import escalation_store
+        from ...services.integrations.twilio_whatsapp import twilio_whatsapp_service
+        
+        try:
+            # Ищем эскалацию связанную с этим тикетом
+            all_escalations = await escalation_store.get_all()
+            for escalation in all_escalations:
+                if escalation.get("ticket_id") == str(ticket_id):
+                    # Добавляем сообщение в эскалацию
+                    await escalation_store.add_operator_message(
+                        escalation.get("escalation_id") or escalation.get("id"),
+                        payload.content
+                    )
+                    
+                    # Если эскалация из WhatsApp - отправляем в WhatsApp
+                    if escalation.get("source") == "whatsapp":
+                        phone_number = escalation.get("phone_number")
+                        if phone_number:
+                            operator_message = f"👨‍💼 Оператор:\n\n{payload.content}"
+                            await twilio_whatsapp_service.send_message(phone_number, operator_message)
+                            print(f"📱 Message sent to WhatsApp: {phone_number}")
+                    break
+        except Exception as e:
+            print(f"Error syncing message to escalation/WhatsApp: {e}")
+    
     return MessageRead.model_validate(message)
 
 
